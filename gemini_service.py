@@ -187,10 +187,10 @@ def _translate_exception(exc: Exception) -> GeminiTutorError:
             category="quota",
         )
     if "401" in low or "403" in low or "permission_denied" in low or "api key" in low:
-        return GeminiTutorError(
-            "Gemini rejected the API key or project permission. Check GEMINI_API_KEY in Replit Secrets and restart the app.",
-            category="auth",
-        )
+    return GeminiTutorError(
+        "Gemini rejected the API key or project permission. Check GEMINI_API_KEY in Streamlit Community Cloud Secrets and restart the app.",
+        category="auth",
+    )
     if "timeout" in low or "timed out" in low or "connection" in low:
         return GeminiTutorError(
             "The Gemini request could not complete because of a network/timeout problem. Offline modes still work.",
