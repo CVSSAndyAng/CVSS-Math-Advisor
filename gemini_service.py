@@ -181,22 +181,29 @@ OUTPUT GUIDANCE
 def _translate_exception(exc: Exception) -> GeminiTutorError:
     text = str(exc)
     low = text.lower()
+
     if "429" in low or "resource_exhausted" in low or "quota" in low or "rate limit" in low:
         return GeminiTutorError(
             "Gemini free-tier quota or rate limit was reached. The offline tutor is still available; try Gemini again later.",
             category="quota",
         )
+
     if "401" in low or "403" in low or "permission_denied" in low or "api key" in low:
-    return GeminiTutorError(
-        "Gemini rejected the API key or project permission. Check GEMINI_API_KEY in Streamlit Community Cloud Secrets and restart the app.",
-        category="auth",
-    )
+        return GeminiTutorError(
+            "Gemini rejected the API key or project permission. Check GEMINI_API_KEY in Streamlit Community Cloud Secrets and restart the app.",
+            category="auth",
+        )
+
     if "timeout" in low or "timed out" in low or "connection" in low:
         return GeminiTutorError(
             "The Gemini request could not complete because of a network/timeout problem. Offline modes still work.",
             category="network",
         )
-    return GeminiTutorError(f"Gemini request failed: {text}", category="service")
+
+    return GeminiTutorError(
+        f"Gemini request failed: {text}",
+        category="service",
+    )
 
 
 def analyze_submission(
