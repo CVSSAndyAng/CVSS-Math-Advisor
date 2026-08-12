@@ -394,6 +394,7 @@ ADAPTIVE RULES
 - For Near transfer, keep the mathematical structure close to the diagnosed skill.
 - For Varied context, preserve the skill but change context/representation meaningfully.
 - For Stretch, add one reasonable extra reasoning demand without introducing an unrelated topic.
+    
 """.strip()
 
     active_client = client or _make_client(api_key)
@@ -408,6 +409,16 @@ ADAPTIVE RULES
             },
         )
         result = TargetedPracticeQuestion.model_validate_json(interaction.output_text)
+        result.question = clean_latex_delimiters(result.question)
+result.target_skill = clean_latex_delimiters(result.target_skill)
+result.why_this_tests_understanding = clean_latex_delimiters(
+    result.why_this_tests_understanding
+)
+result.hints = [clean_latex_delimiters(hint) for hint in result.hints]
+result.answer = clean_latex_delimiters(result.answer)
+result.worked_solution = [
+    clean_latex_delimiters(step) for step in result.worked_solution
+]
     except ValidationError as exc:
         raise GeminiTutorError(
             "Gemini returned the follow-up practice question in an unexpected format. Please try again.",
