@@ -97,7 +97,7 @@ def _make_client(api_key: str | None = None):
         from google import genai
     except ImportError as exc:
         raise GeminiTutorError(
-            "The google-genai package is not installed. The google-genai package is not installed. Streamlit Cloud should install it from requirements.txt.",
+            "The google-genai package is not installed. Streamlit Cloud should install it from requirements.txt.",
             category="dependency",
         ) from exc
 
