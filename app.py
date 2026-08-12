@@ -81,6 +81,21 @@ def render_math_text(text: str) -> None:
     st.markdown(math_markdown(text))
 
 
+def _mathio_latex(text: str) -> str:
+    """Normalize model LaTeX for equation-view rendering without showing delimiters."""
+    if not text:
+        return r"\text{No reference answer available}"
+    value = str(text).strip()
+    for token in (r"\(", r"\)", r"\[", r"\]", "$$", "$"):
+        value = value.replace(token, "")
+    return value.strip()
+
+
+def render_mathio(text: str) -> None:
+    """Render reference mathematics in MathIO/equation view."""
+    st.latex(_mathio_latex(text))
+
+
 MATHLIVE_VERSION = "0.110.0"  # Patched MathLive release used by the visual equation editor.
 
 _EQUATION_EDITOR_HTML = """
@@ -374,6 +389,8 @@ def initialize_ai_practice(analysis: GeminiAnalysis) -> None:
 def practice_attempt_is_secure(result: PracticeEvaluation) -> bool:
     return (
         result.is_correct
+        and result.all_required_parts_complete
+        and not result.missing_or_incorrect_parts
         and result.answer_score >= 80
         and result.reasoning_score >= 80
         and result.mastery in {"Secure", "Strong"}
@@ -483,12 +500,6 @@ def render_attempt(result: AttemptResult) -> None:
 
 
 def render_ai_analysis(a: GeminiAnalysis) -> None:
-    st.markdown("## Gemini reasoning analysis")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Judgement", a.overall_judgement.replace("_", " ").title())
-    c2.metric("Confidence", a.confidence.title())
-    c3.metric("Human review", "Recommended" if a.needs_human_review else "Not flagged")
-
     render_math_text(f"**Interpreted question:** {a.interpreted_question}")
     st.markdown(f"**Likely syllabus topic:** {a.likely_syllabus_topic}")
     render_math_text(f"**Method evidenced by the working:** {a.student_method}")
@@ -550,13 +561,14 @@ def render_practice_evaluation(e: PracticeEvaluation) -> None:
         st.markdown("**Strengths**")
         for item in e.strengths:
             render_math_text(f"• {item}")
+    if e.missing_or_incorrect_parts:
+        st.warning("Parts still to complete correctly: " + ", ".join(e.missing_or_incorrect_parts))
     if e.gaps:
         st.markdown("**Gaps**")
         for item in e.gaps:
             render_math_text(f"• {item}")
     render_math_text(f"**Next hint:** {e.next_hint}")
     render_math_text(f"**Corrected next step:** {e.corrected_next_step}")
-    st.caption(f"Gemini confidence: {e.confidence}")
 
 
 def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:
@@ -913,6 +925,8 @@ with ai_tab:
             with st.container(border=True):
                 render_math_text(f"**{pq.question}**")
             render_math_text(f"**Target skill:** {pq.target_skill}")
+            if pq.required_parts and pq.required_parts != ["whole question"]:
+                st.caption("All parts required for mastery: " + ", ".join(pq.required_parts))
             render_math_text(pq.why_this_tests_understanding)
             with st.expander("Practice hints"):
                 for i, hint in enumerate(pq.hints, 1):
@@ -1019,9 +1033,12 @@ with ai_tab:
                             st.error(str(exc))
 
             with st.expander("Reveal reference answer and worked solution"):
-                st.markdown(f"**Answer:** {pq.answer}")
+                st.markdown("**Answer**")
+                render_mathio(pq.answer)
+                st.markdown("**Worked solution**")
                 for i, line in enumerate(pq.worked_solution, 1):
-                    st.write(f"{i}. {line}")
+                    st.caption(f"Step {i}")
+                    render_mathio(line)
 
 # ---------- Offline generated practice ----------
 with practice_tab:

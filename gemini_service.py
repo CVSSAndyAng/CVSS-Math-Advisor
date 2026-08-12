@@ -60,16 +60,22 @@ class TargetedPracticeQuestion(BaseModel):
     question: str
     target_skill: str
     why_this_tests_understanding: str
+    required_parts: list[str] = Field(
+        description="Every part that must be completed for mastery, e.g. ['(a)', '(b)', '(c)']. Use ['whole question'] for a single-part question."
+    )
     hints: list[str] = Field(description="Three progressive hints, from light to stronger")
-    answer: str
-    worked_solution: list[str]
+    answer: str = Field(
+        description="Complete reference answer covering every required part, as MathIO-ready LaTeX with no math delimiters. Use the LaTeX text command for labels, words, and units."
+    )
+    worked_solution: list[str] = Field(
+        description="Complete worked solution covering every required part. Each item must be MathIO-ready LaTeX with no math delimiters."
+    )
 
 
 class GeminiAnalysis(BaseModel):
     interpreted_question: str
     likely_syllabus_topic: str
     student_method: str
-    overall_judgement: Literal["correct", "mostly_correct", "needs_revision", "unclear"]
     strengths: list[str]
     steps: list[ReasoningStep]
     first_logic_break_step: int = Field(description="0 if no logic break is identified; otherwise the 1-based step number")
@@ -79,13 +85,16 @@ class GeminiAnalysis(BaseModel):
     hint_ladder: list[str] = Field(description="Three progressively stronger hints")
     corrected_path: list[str]
     final_answer: str
-    confidence: Literal["high", "medium", "low"]
-    needs_human_review: bool
     practice_questions: list[TargetedPracticeQuestion] = Field(description="Exactly three: Near transfer, Varied context, Stretch")
 
 
 class PracticeEvaluation(BaseModel):
     is_correct: bool
+    all_required_parts_complete: bool = Field(
+        description="True only when every required part of the practice question has been attempted and is mathematically correct."
+    )
+    completed_parts: list[str] = Field(description="Required parts that the student completed correctly.")
+    missing_or_incorrect_parts: list[str] = Field(description="Required parts that are missing, incomplete, or incorrect.")
     answer_score: int = Field(ge=0, le=100)
     reasoning_score: int = Field(ge=0, le=100)
     summary: str
@@ -173,6 +182,9 @@ SAFETY AND RELIABILITY
 - A different valid method is acceptable.
 - Provide exactly three targeted practice questions: Near transfer, Varied context, and Stretch.
 - Each practice question must be original, solvable, syllabus-appropriate, and have a verified answer and worked solution.
+- For every practice question, required_parts MUST list every part the student must answer. Example: ["(a)", "(b)", "(c)"]. For a single-part question use ["whole question"].
+- The reference answer and worked_solution MUST cover every required part. For multi-part questions, label every part explicitly in the answer and in the worked solution using the same labels.
+- EXCEPTION FOR REFERENCE CONTENT: practice_questions.answer and every practice_questions.worked_solution item must be MathIO-ready LaTeX with NO math delimiters. Use the LaTeX text command for labels, words, and units.
 - Render mathematical expressions in LaTeX notation using \\( ... \\) for inline maths and \\[ ... \\] for display maths.
 - Use textbook notation such as \\frac{{a}}{{b}}, \\sqrt{{x}}, x^2, and x_1.
 - Never use dollar-sign math delimiters such as $...$ or $$...$$ in any output field.
@@ -192,6 +204,9 @@ OUTPUT GUIDANCE
 - first_logic_break_step must be 0 if no material error is identified.
 - hint_ladder must contain three hints from light to stronger.
 - practice_questions must contain exactly three items, one of each required kind.
+- Every practice question must include required_parts, and its answer/worked_solution must solve every required part.
+- Multi-part answers and worked solutions must explicitly label each part so completeness can be verified.
+- Reference answer/worked_solution fields are the exception to the delimiter rule: return MathIO-ready LaTeX only, with no math delimiters.
 - Keep feedback concise and actionable for a secondary-school student.
 - When a field contains mathematics, wrap only the mathematical part in \\( ... \\) or \\[ ... \\].
 """.strip()
@@ -295,6 +310,39 @@ Return all confirmed main questions in visual/document order.
     return result
 
 
+
+def _validate_practice_question_completeness(question: TargetedPracticeQuestion) -> None:
+    """Reject practice items whose reference material does not cover all required parts."""
+    required = [part.strip() for part in question.required_parts if part and part.strip()]
+    if not required:
+        raise GeminiTutorError(
+            f"{question.kind} did not identify the parts required for mastery. Please regenerate the analysis.",
+            category="format",
+        )
+
+    if required == ["whole question"]:
+        if not question.answer.strip() or not question.worked_solution:
+            raise GeminiTutorError(
+                f"{question.kind} is missing a complete reference answer or worked solution. Please regenerate the analysis.",
+                category="format",
+            )
+        return
+
+    if len(question.worked_solution) < len(required):
+        raise GeminiTutorError(
+            f"{question.kind} has {len(required)} required parts but its reference solution does not cover all of them. Please regenerate the analysis.",
+            category="format",
+        )
+
+    answer_text = question.answer
+    worked_text = " ".join(question.worked_solution)
+    missing_labels = [part for part in required if part not in answer_text or part not in worked_text]
+    if missing_labels:
+        raise GeminiTutorError(
+            f"{question.kind} reference material is incomplete for: {', '.join(missing_labels)}. Please regenerate the analysis.",
+            category="format",
+        )
+
 def analyze_submission(
     *,
     track_label: str,
@@ -351,6 +399,8 @@ def analyze_submission(
             "Gemini did not return the required three practice-question types. Please regenerate the analysis.",
             category="format",
         )
+    for practice_question in result.practice_questions:
+        _validate_practice_question_completeness(practice_question)
     return result
 
 
@@ -376,6 +426,9 @@ Do not infer personality, intelligence, motivation, or medical/learning conditio
 The practice question is:
 {practice_question.question}
 
+Required parts that ALL must be completed for mastery:
+{', '.join(practice_question.required_parts) if practice_question.required_parts else 'Infer every printed part from the question text'}
+
 Verified reference answer:
 {practice_question.answer}
 
@@ -387,6 +440,14 @@ The original gap this practice is testing:
 
 Student working:
 {student_working}
+
+MULTI-PART MASTERY RULES
+- A multi-part question is NOT correct unless every required part is attempted and correct.
+- If even one required part is missing, incomplete, or wrong: set all_required_parts_complete=false, set is_correct=false, keep answer_score below 80, and set mastery no higher than Developing.
+- Never award Secure or Strong mastery for solving only one part of a multi-part question.
+- completed_parts must list only required parts completed correctly.
+- missing_or_incorrect_parts must list every required part that is missing, incomplete, or wrong.
+- If the student does not label parts explicitly, infer which part their working addresses from the mathematics, but never assume an unshown part was completed.
 
 Return concise tutoring feedback. first_logic_break_step must be 0 if no material logic error is found.
 A correct final answer with unsupported or incorrect reasoning should not automatically receive 100 for reasoning.
@@ -445,6 +506,9 @@ ORIGINAL DIAGNOSED GAP:
 PREVIOUS {kind.upper()} QUESTION:
 {previous_question.question}
 
+PREVIOUS REQUIRED PARTS:
+{', '.join(previous_question.required_parts) if previous_question.required_parts else '[infer from question]'}
+
 PREVIOUS STUDENT WORKING:
 {previous_working}
 
@@ -465,12 +529,15 @@ ADAPTIVE RULES
 - Keep it appropriate to the selected Singapore O-Level / N-Level track.
 - Independently verify the mathematics.
 - Include exactly three progressive hints.
-- Include a verified answer and concise worked solution.
+- Populate required_parts with every part the student must complete. Use ["whole question"] for a single-part question.
+- Include a verified answer and concise worked solution that cover EVERY required part.
+- The answer and every worked_solution item must be MathIO-ready LaTeX with no delimiters; use the LaTeX text command for labels, words, and units.
 - Do not reveal the answer inside the question text or the first hint.
 - For Near transfer, keep the mathematical structure close to the diagnosed skill.
 - For Varied context, preserve the skill but change context/representation meaningfully.
 - For Stretch, add one reasonable extra reasoning demand without introducing an unrelated topic.
-- Render mathematical expressions in LaTeX using \\( ... \\) inline or \\[ ... \\] for display maths.
+- In question/target_skill/why/hints, render mathematical expressions using \\( ... \\) inline or \\[ ... \\] for display maths.
+- In answer/worked_solution, return MathIO-ready LaTeX only, without any delimiters.
 - Use textbook notation such as \\frac{{a}}{{b}}, \\sqrt{{x}}, x^2, and x_1.
 - Never use dollar-sign math delimiters such as $...$ or $$...$$.
 """.strip()
@@ -501,4 +568,5 @@ ADAPTIVE RULES
             f"Gemini generated {result.kind} instead of the required {kind} follow-up. Please try again.",
             category="format",
         )
+    _validate_practice_question_completeness(result)
     return result
