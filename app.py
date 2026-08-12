@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import secrets
 from collections import Counter
 from datetime import datetime, timezone
@@ -15,9 +14,11 @@ from gemini_service import (
     GeminiAnalysis,
     GeminiTutorError,
     PracticeEvaluation,
+    QuestionDetectionResult,
     TargetedPracticeQuestion,
     UploadedAsset,
     analyze_submission,
+    detect_questions_in_assets,
     evaluate_practice_attempt,
     generate_followup_practice_question,
     get_api_key,
@@ -80,28 +81,201 @@ def render_math_text(text: str) -> None:
     st.markdown(math_markdown(text))
 
 
-def _strip_outer_math_delimiters(line: str) -> str:
-    value = line.strip()
-    pairs = [
-        (r"\[", r"\]"),
-        (r"\(", r"\)"),
-        ("$$", "$$"),
-        ("$", "$"),
-    ]
-    for left, right in pairs:
-        if value.startswith(left) and value.endswith(right) and len(value) >= len(left) + len(right):
-            return value[len(left):-len(right)].strip()
-    return value
+MATHLIVE_VERSION = "0.110.0"  # Patched MathLive release used by the visual equation editor.
+
+_EQUATION_EDITOR_HTML = """
+<div class="omt-math-editor">
+  <div class="omt-editor-label"></div>
+  <div class="omt-editor-help">Type directly into each maths box. Use the keyboard icon for fractions, roots, powers, trig and symbols.</div>
+  <div class="omt-editor-rows"></div>
+  <div class="omt-editor-actions">
+    <button type="button" class="omt-add-step">＋ Add step</button>
+  </div>
+  <div class="omt-editor-status" aria-live="polite"></div>
+</div>
+"""
+
+_EQUATION_EDITOR_CSS = """
+.omt-math-editor { width: 100%; font-family: var(--st-font, sans-serif); }
+.omt-editor-label { font-weight: 600; margin-bottom: .3rem; }
+.omt-editor-help { color: var(--st-text-color); opacity: .72; font-size: .86rem; margin-bottom: .65rem; }
+.omt-editor-row { display: grid; grid-template-columns: 3.2rem minmax(0,1fr) 2.5rem; align-items: center; gap: .45rem; margin: .45rem 0; }
+.omt-step-label { font-size: .83rem; opacity: .75; }
+.omt-editor-row math-field { width: 100%; min-height: 3.1rem; box-sizing: border-box; border: 1px solid rgba(128,128,128,.45); border-radius: .55rem; padding: .45rem .6rem; font-size: 1.12rem; background: var(--st-background-color, white); color: var(--st-text-color, #222); --caret-color: var(--st-primary-color, #ff4b4b); --selection-background-color: color-mix(in srgb, var(--st-primary-color, #ff4b4b) 20%, transparent); }
+.omt-editor-row math-field:focus-within { outline: 2px solid color-mix(in srgb, var(--st-primary-color, #ff4b4b) 45%, transparent); outline-offset: 1px; }
+.omt-remove-step { border: 0; background: transparent; cursor: pointer; font-size: 1.05rem; opacity: .65; padding: .3rem; }
+.omt-remove-step:hover { opacity: 1; }
+.omt-editor-actions { margin-top: .5rem; }
+.omt-add-step { border: 1px solid rgba(128,128,128,.38); border-radius: .45rem; background: transparent; color: var(--st-text-color, #222); padding: .4rem .7rem; cursor: pointer; }
+.omt-add-step:hover { border-color: var(--st-primary-color, #ff4b4b); }
+.omt-editor-status { font-size: .78rem; opacity: .7; margin-top: .4rem; min-height: 1rem; }
+@media (max-width: 640px) {
+  .omt-editor-row { grid-template-columns: 2.7rem minmax(0,1fr) 2.2rem; }
+  .omt-editor-row math-field { font-size: 1.05rem; }
+}
+"""
+
+_EQUATION_EDITOR_JS = f"""
+const MATHLIVE_URL = 'https://cdn.jsdelivr.net/npm/mathlive@{MATHLIVE_VERSION}/+esm';
+
+async function ensureMathLive() {{
+  if (!customElements.get('math-field')) {{
+    if (!globalThis.__omtMathLivePromise) {{
+      globalThis.__omtMathLivePromise = import(MATHLIVE_URL);
+    }}
+    await globalThis.__omtMathLivePromise;
+  }}
+}}
+
+function normalizedPayload(raw) {{
+  const latex = Array.isArray(raw?.latex) ? raw.latex.map(x => String(x ?? '')) : [''];
+  const ascii = Array.isArray(raw?.ascii) ? raw.ascii.map(x => String(x ?? '')) : latex.map(() => '');
+  if (latex.length === 0) latex.push('');
+  while (ascii.length < latex.length) ascii.push('');
+  return {{ latex: latex.slice(0, 20), ascii: ascii.slice(0, 20) }};
+}}
+
+export default async function(component) {{
+  const {{ parentElement, data, setStateValue }} = component;
+  const label = parentElement.querySelector('.omt-editor-label');
+  const rows = parentElement.querySelector('.omt-editor-rows');
+  const addButton = parentElement.querySelector('.omt-add-step');
+  const status = parentElement.querySelector('.omt-editor-status');
+  label.textContent = data?.label || 'Student working';
+
+  try {{
+    await ensureMathLive();
+  }} catch (err) {{
+    status.textContent = 'Equation editor could not load. Check the browser connection and reload the page.';
+    return;
+  }}
+
+  const incoming = normalizedPayload(data?.payload);
+  const state = parentElement.__omtState || {{ payload: incoming, timer: null }};
+  parentElement.__omtState = state;
+
+  // Python session state is authoritative after a Streamlit rerun.
+  state.payload = incoming;
+
+  const emit = () => {{
+    const editors = Array.from(rows.querySelectorAll('math-field'));
+    state.payload = {{
+      latex: editors.map(mf => mf.value || ''),
+      ascii: editors.map(mf => {{
+        try {{ return mf.getValue('ascii-math') || ''; }} catch (_) {{ return ''; }}
+      }}),
+    }};
+    setStateValue('payload', state.payload);
+    status.textContent = 'Working saved';
+  }};
+
+  const scheduleEmit = () => {{
+    status.textContent = 'Editing…';
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(emit, 700);
+  }};
+
+  const renderRows = () => {{
+    rows.replaceChildren();
+    state.payload.latex.forEach((value, index) => {{
+      const row = document.createElement('div');
+      row.className = 'omt-editor-row';
+
+      const step = document.createElement('span');
+      step.className = 'omt-step-label';
+      step.textContent = `Step ${{index + 1}}`;
+
+      const mf = document.createElement('math-field');
+      mf.value = value || '';
+      mf.setAttribute('virtual-keyboard-mode', 'auto');
+      mf.setAttribute('smart-fence', '');
+      mf.setAttribute('aria-label', `Mathematics working step ${{index + 1}}`);
+      mf.addEventListener('input', scheduleEmit);
+      mf.addEventListener('change', emit);
+      mf.addEventListener('blur', emit);
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'omt-remove-step';
+      remove.textContent = '✕';
+      remove.title = 'Remove this step';
+      remove.setAttribute('aria-label', `Remove step ${{index + 1}}`);
+      remove.disabled = state.payload.latex.length <= 1;
+      remove.onclick = () => {{
+        if (state.payload.latex.length <= 1) return;
+        state.payload.latex.splice(index, 1);
+        state.payload.ascii.splice(index, 1);
+        renderRows();
+        emit();
+      }};
+
+      row.append(step, mf, remove);
+      rows.appendChild(row);
+    }});
+  }};
+
+  addButton.onclick = () => {{
+    if (state.payload.latex.length >= 20) {{
+      status.textContent = 'Maximum 20 working steps.';
+      return;
+    }}
+    state.payload.latex.push('');
+    state.payload.ascii.push('');
+    renderRows();
+    emit();
+    const editors = rows.querySelectorAll('math-field');
+    editors[editors.length - 1]?.focus();
+  }};
+
+  renderRows();
+}}
+"""
+
+try:
+    _equation_editor_component = st.components.v2.component(
+        "omt_math_working_editor",
+        html=_EQUATION_EDITOR_HTML,
+        css=_EQUATION_EDITOR_CSS,
+        js=_EQUATION_EDITOR_JS,
+        isolate_styles=False,
+    )
+except Exception:
+    _equation_editor_component = None
 
 
-def latex_preview_source(text: str) -> str:
-    """Prepare one or more student-entered LaTeX lines for st.latex preview."""
-    lines = [_strip_outer_math_delimiters(line) for line in text.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    if len(lines) == 1:
-        return lines[0]
-    return r"\begin{aligned}" + r" \\ ".join(lines) + r"\end{aligned}"
+def equation_working_editor(label: str, *, key: str) -> tuple[list[str], list[str]]:
+    """Render a visual multi-step MathLive editor and return LaTeX + ASCIIMath lines."""
+    if _equation_editor_component is None:
+        fallback = st.text_area(
+            label,
+            key=f"{key}_fallback",
+            height=150,
+            placeholder=r"Fallback: type one LaTeX step per line, e.g. m=\frac{4-1}{-2-7}",
+        )
+        lines = [line.strip() for line in fallback.splitlines() if line.strip()]
+        return lines, lines
+
+    prior = st.session_state.get(key, {})
+    payload = prior.get("payload", {"latex": [""], "ascii": [""]}) if isinstance(prior, dict) else {"latex": [""], "ascii": [""]}
+    if not isinstance(payload, dict):
+        payload = {"latex": [""], "ascii": [""]}
+    payload.setdefault("latex", [""])
+    payload.setdefault("ascii", [""])
+
+    result = _equation_editor_component(
+        data={"label": label, "payload": payload},
+        default={"payload": payload},
+        key=key,
+        on_payload_change=lambda: None,
+        width="stretch",
+        height="content",
+    )
+    output = getattr(result, "payload", None) or payload
+    latex = [str(x).strip() for x in output.get("latex", [])]
+    ascii_values = [str(x).strip() for x in output.get("ascii", [])]
+    while len(ascii_values) < len(latex):
+        ascii_values.append("")
+    return latex, ascii_values
 
 
 def working_input(
@@ -111,32 +285,35 @@ def working_input(
     format_key: str,
     height: int = 170,
     plain_placeholder: str = "Show the important reasoning steps, not only the final answer.",
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     mode = st.radio(
-        "Working input format",
-        ["Plain text", "LaTeX"],
+        "Working input method",
+        ["Equation editor", "Text working"],
         horizontal=True,
         key=format_key,
-        help="Choose LaTeX to type textbook notation such as \\frac{a}{b}, \\sqrt{x}, x^2, and x_1.",
+        help="Equation editor gives a visual maths keyboard; Text working is useful for sentences and explanations.",
     )
-    if mode == "LaTeX":
-        placeholder = (
-            "Example:\n"
-            r"m = \frac{y_2-y_1}{x_2-x_1}" "\n"
-            r"m = \frac{4-1}{-2-7} = -\frac{1}{3}"
+
+    if mode == "Equation editor":
+        latex_lines, ascii_lines = equation_working_editor(label, key=f"{text_key}_equation")
+        explanation = st.text_area(
+            "Optional explanation in words",
+            key=f"{text_key}_explanation",
+            height=90,
+            placeholder="Example: I expanded the bracket first, then collected like terms.",
         )
-    else:
-        placeholder = plain_placeholder
+        used_latex = [line for line in latex_lines if line]
+        used_ascii = [line for line in ascii_lines if line]
+        working_lines = [f"Step {i}: \\({line}\\)" for i, line in enumerate(used_latex, 1)]
+        if explanation.strip():
+            working_lines.append(f"Student explanation: {explanation.strip()}")
+        working_for_gemini = "\n".join(working_lines)
+        offline_text = "\n".join(used_ascii)
+        st.caption("The editor stores LaTeX internally for accurate maths rendering; students do not need to type LaTeX commands.")
+        return working_for_gemini, mode, offline_text
 
-    value = st.text_area(label, key=text_key, height=height, placeholder=placeholder)
-    if mode == "LaTeX" and value.strip():
-        st.caption("Formatted mathematics preview")
-        try:
-            st.latex(latex_preview_source(value))
-        except Exception:
-            st.info("Preview could not render this LaTeX yet. You can still submit it to Gemini for analysis.")
-    return value, mode
-
+    value = st.text_area(label, key=text_key, height=height, placeholder=plain_placeholder)
+    return value, mode, value
 
 def init_state() -> None:
     defaults: dict[str, Any] = {
@@ -150,6 +327,10 @@ def init_state() -> None:
         "ai_analysis": None,
         "ai_error": "",
         "ai_fallback_result": None,
+        "ai_question_detection": None,
+        "ai_question_detection_error": "",
+        "ai_question_file_signature": "",
+        "ai_selected_question_index": 0,
         "ai_practice_stage": 0,
         "ai_practice_current_question": None,
         "ai_practice_evaluation": None,
@@ -222,7 +403,8 @@ def reset_current_question() -> None:
     st.session_state.attempt_result = None
     st.session_state.hint_level = 0
     st.session_state.reveal_solution = False
-    st.session_state.pop("practice_working", None)
+    for key in ("practice_working", "practice_working_format", "practice_working_equation", "practice_working_explanation"):
+        st.session_state.pop(key, None)
 
 
 def make_new_question(track: str, topic: str, difficulty: str) -> None:
@@ -393,6 +575,70 @@ def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:
     return assets
 
 
+def question_file_signature(files: list[Any] | None) -> str:
+    files = files or []
+    return "|".join(f"{getattr(f, 'name', '')}:{getattr(f, 'size', 0)}:{getattr(f, 'type', '')}" for f in files)
+
+
+def detected_question_context(detection: QuestionDetectionResult, index: int) -> str:
+    if not detection.questions:
+        return ""
+    index = max(0, min(index, len(detection.questions) - 1))
+    q = detection.questions[index]
+    lines = [
+        "[SELECTED QUESTION FROM UPLOADED WORKSHEET]",
+        f"Main question number: {q.question_number}",
+        f"Main question stem: {q.question_text}",
+        f"Likely topic: {q.topic_hint}",
+    ]
+    if q.subparts:
+        lines.append("Subparts:")
+        for part in q.subparts:
+            lines.append(f"- {part.label}: {part.question_text}")
+    lines.append("IMPORTANT: Analyse this selected main question only. Ignore other unrelated questions visible in the uploaded source.")
+    return "\n".join(lines)
+
+
+def render_question_detection(detection: QuestionDetectionResult) -> int:
+    subpart_count = sum(len(q.subparts) for q in detection.questions)
+    st.success(
+        f"Detected {detection.main_question_count} confirmed main question(s)"
+        + (f" with {subpart_count} subpart(s)." if subpart_count else ".")
+    )
+    if detection.possible_additional_question_count:
+        st.warning(
+            f"Gemini also saw {detection.possible_additional_question_count} possible additional question(s) that were too cropped or unclear to confirm."
+        )
+    st.caption(f"Detection confidence: {detection.overall_confidence.title()}")
+    for note in detection.notes:
+        st.caption(f"• {note}")
+
+    if not detection.questions:
+        st.info("No confirmed main question could be extracted. Try a clearer image or smaller crop.")
+        return 0
+
+    options = list(range(len(detection.questions)))
+    current = min(int(st.session_state.ai_selected_question_index), len(options) - 1)
+    selected = st.selectbox(
+        "Choose the main question to analyse",
+        options,
+        index=current,
+        format_func=lambda i: (
+            f"Question {detection.questions[i].question_number} · {detection.questions[i].topic_hint}"
+            + (f" · {len(detection.questions[i].subparts)} subpart(s)" if detection.questions[i].subparts else "")
+        ),
+        key="ai_detected_question_selector",
+    )
+    st.session_state.ai_selected_question_index = int(selected)
+    q = detection.questions[selected]
+    with st.expander("Review detected question text", expanded=True):
+        render_math_text(f"**Question {q.question_number}:** {q.question_text}")
+        for part in q.subparts:
+            render_math_text(f"**{part.label}** {part.question_text}")
+        st.caption(f"Topic hint: {q.topic_hint} · Confidence: {q.confidence}")
+    return int(selected)
+
+
 def offline_evidence_for(question_text: str, working_text: str) -> tuple[str, AttemptResult | None]:
     if not question_text.strip() or not working_text.strip():
         return "", None
@@ -458,7 +704,7 @@ with st.sidebar:
 
 st.title("Singapore O-Level & N-Level Mathematics Tutor")
 st.write(
-    "Use **Gemini online analysis** for uploaded/handwritten work and complex questions. "
+    "Use **Gemini online analysis** for uploaded/handwritten work and complex questions, with automatic question detection and a visual equation editor. "
     "If Gemini is unavailable or its free quota is reached, the **offline practice and algebra checker remain usable**."
 )
 
@@ -496,12 +742,22 @@ with ai_tab:
         accept_multiple_files=True,
         key="ai_question_files",
     )
-    w_text, w_input_mode = working_input(
+
+    # Clear stale detection results when the uploaded source changes.
+    current_signature = question_file_signature(q_files)
+    if current_signature != st.session_state.ai_question_file_signature:
+        st.session_state.ai_question_file_signature = current_signature
+        st.session_state.ai_question_detection = None
+        st.session_state.ai_question_detection_error = ""
+        st.session_state.ai_selected_question_index = 0
+        st.session_state.pop("ai_detected_question_selector", None)
+
+    w_text, w_input_mode, w_offline_text = working_input(
         "Student working",
         text_key="ai_working_text",
         format_key="ai_working_format",
         height=190,
-        plain_placeholder="Type the student's steps here, or leave blank if the working is in the uploaded file.",
+        plain_placeholder="Type the student's steps here, use the equation editor, or leave blank if the working is in the uploaded file.",
     )
     w_files = st.file_uploader(
         "Student working image/PDF (optional)",
@@ -511,9 +767,47 @@ with ai_tab:
     )
 
     consent = st.checkbox(
-        "I understand that clicking Analyse with Gemini sends these inputs to Google's Gemini API.",
+        "I understand that Gemini features send the selected inputs to Google's Gemini API.",
         key="gemini_consent",
     )
+
+    selected_detection_index = 0
+    if q_files:
+        st.markdown("### Detect questions in the upload")
+        st.write(
+            "Gemini can count the **main questions** in the uploaded image/PDF, keep subparts grouped under their main question, "
+            "and let the student choose which question to analyse."
+        )
+        if st.button("Detect questions in uploaded file(s)", use_container_width=True):
+            st.session_state.ai_question_detection = None
+            st.session_state.ai_question_detection_error = ""
+            st.session_state.pop("ai_detected_question_selector", None)
+            if not consent:
+                st.session_state.ai_question_detection_error = (
+                    "Confirm the Gemini data-sharing acknowledgement before detecting questions."
+                )
+            else:
+                try:
+                    assets_q = uploaded_assets(q_files)
+                    with st.spinner("Detecting main questions and subparts in the upload..."):
+                        detection = detect_questions_in_assets(
+                            track_label=track_label,
+                            question_assets=assets_q,
+                            api_key=explicit_key,
+                            model=model,
+                        )
+                    st.session_state.ai_question_detection = detection
+                    st.rerun()
+                except GeminiTutorError as exc:
+                    st.session_state.ai_question_detection_error = str(exc)
+                    st.rerun()
+
+        if st.session_state.ai_question_detection_error:
+            st.error(st.session_state.ai_question_detection_error)
+
+        detection: QuestionDetectionResult | None = st.session_state.ai_question_detection
+        if detection is not None:
+            selected_detection_index = render_question_detection(detection)
 
     if st.button("Analyse with Gemini", type="primary", use_container_width=True):
         st.session_state.ai_analysis = None
@@ -523,12 +817,17 @@ with ai_tab:
         if not consent:
             st.error("Confirm the Gemini data-sharing acknowledgement before sending the submission.")
         else:
-            if w_input_mode == "Plain text":
-                evidence, offline_result = offline_evidence_for(q_text, w_text)
-            else:
-                evidence, offline_result = "", None
+            question_for_analysis = q_text
+            detection = st.session_state.ai_question_detection
+            if detection is not None and detection.questions:
+                question_for_analysis = "\n\n".join(
+                    part for part in [q_text.strip(), detected_question_context(detection, selected_detection_index)] if part
+                )
+
+            # The visual equation editor also returns ASCIIMath for the deterministic algebra fallback.
+            evidence, offline_result = offline_evidence_for(question_for_analysis, w_offline_text)
             working_for_gemini = (
-                f"[Student working input format: {w_input_mode}]\n{w_text}" if w_text.strip() else w_text
+                f"[Student working input method: {w_input_mode}]\n{w_text}" if w_text.strip() else w_text
             )
             try:
                 assets_q = uploaded_assets(q_files)
@@ -536,7 +835,7 @@ with ai_tab:
                 with st.spinner("Gemini is checking the mathematics and the student's reasoning..."):
                     analysis = analyze_submission(
                         track_label=track_label,
-                        question_text=q_text,
+                        question_text=question_for_analysis,
                         working_text=working_for_gemini,
                         question_assets=assets_q,
                         working_assets=assets_w,
@@ -620,7 +919,7 @@ with ai_tab:
                     render_math_text(f"**Hint {i}:** {hint}")
 
             working_key = f"ai_practice_working_{stage_index}_{st.session_state.ai_practice_question_version}"
-            attempt, practice_input_mode = working_input(
+            attempt, practice_input_mode, _practice_offline_text = working_input(
                 f"Student working for {kind}",
                 text_key=working_key,
                 format_key=f"{working_key}_format",
@@ -634,7 +933,7 @@ with ai_tab:
                             track_label=track_label,
                             practice_question=pq,
                             student_working=(
-                                f"[Student working input format: {practice_input_mode}]\n{attempt}"
+                                f"[Student working input method: {practice_input_mode}]\n{attempt}"
                                 if attempt.strip() else attempt
                             ),
                             original_gap=analysis.misconception_or_gap,
@@ -758,17 +1057,19 @@ with practice_tab:
         if st.session_state.hint_level == 0:
             st.caption("Try the question before revealing a hint.")
 
-        working = st.text_area(
+        working, working_mode, working_offline = working_input(
             "Your working and answer",
-            key="practice_working",
+            text_key="practice_working",
+            format_key="practice_working_format",
             height=190,
-            placeholder="Show the important steps, one line at a time where possible.",
+            plain_placeholder="Show the important steps, one line at a time where possible.",
         )
+        working_to_check = working_offline if working_mode == "Equation editor" else working
         if st.button("Check my reasoning offline", type="primary", use_container_width=True):
-            if not working.strip():
+            if not working_to_check.strip():
                 st.error("Enter your working and answer first.")
             else:
-                result = evaluate_attempt(question, working)
+                result = evaluate_attempt(question, working_to_check)
                 st.session_state.attempt_result = result
                 record_history(question, result)
                 st.rerun()
@@ -810,14 +1111,21 @@ with own_tab:
     st.info("Example: `Solve 3(x + 2) = 18.` Enter each working line separately, such as `3x + 6 = 18`.")
 
     own_q = st.text_area("Question", key="own_question", height=95, placeholder="Solve 3(x + 2) = 18.")
-    own_w = st.text_area("Student working", key="own_working", height=190, placeholder="3(x + 2) = 18\n3x + 6 = 18\n3x = 12\nx = 4")
+    own_w, own_mode, own_w_offline = working_input(
+        "Student working",
+        text_key="own_working",
+        format_key="own_working_format",
+        height=190,
+        plain_placeholder="3(x + 2) = 18\n3x + 6 = 18\n3x = 12\nx = 4",
+    )
+    own_working_to_check = own_w_offline if own_mode == "Equation editor" else own_w
 
     if st.button("Check typed algebra", type="primary"):
-        if not own_q.strip() or not own_w.strip():
+        if not own_q.strip() or not own_working_to_check.strip():
             st.error("Enter both the question and the student's working.")
         else:
             try:
-                res = analyze_own_algebra_question(own_q, own_w)
+                res = analyze_own_algebra_question(own_q, own_working_to_check)
                 render_attempt(res)
             except ValueError as exc:
                 st.warning(str(exc))

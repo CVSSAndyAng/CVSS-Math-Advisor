@@ -23,6 +23,29 @@ class UploadedAsset:
     data: bytes
 
 
+class DetectedSubpart(BaseModel):
+    label: str = Field(description="Subpart label such as (a), (b)(i), or (ii)")
+    question_text: str = Field(description="Conservative transcription of this subpart")
+    confidence: Literal["high", "medium", "low"]
+
+
+class DetectedQuestion(BaseModel):
+    question_number: str = Field(description="Printed main-question number, or ? if genuinely unclear")
+    question_text: str = Field(description="Conservative transcription of the main question stem")
+    subparts: list[DetectedSubpart] = Field(default_factory=list)
+    topic_hint: str = Field(description="Short likely syllabus topic; leave broad when uncertain")
+    page_numbers: list[int] = Field(default_factory=list, description="1-based PDF page numbers or uploaded-file order")
+    confidence: Literal["high", "medium", "low"]
+
+
+class QuestionDetectionResult(BaseModel):
+    main_question_count: int = Field(ge=0, description="Number of confirmed main questions; subparts do not increase this count")
+    questions: list[DetectedQuestion]
+    possible_additional_question_count: int = Field(ge=0, default=0)
+    overall_confidence: Literal["high", "medium", "low"]
+    notes: list[str] = Field(default_factory=list)
+
+
 class ReasoningStep(BaseModel):
     line_number: int = Field(description="1-based step number in the student's visible working")
     student_step: str = Field(description="The student's step, transcribed conservatively")
@@ -202,6 +225,74 @@ def _translate_exception(exc: Exception) -> GeminiTutorError:
             category="network",
         )
     return GeminiTutorError(f"Gemini request failed: {text}", category="service")
+
+
+def detect_questions_in_assets(
+    *,
+    track_label: str,
+    question_assets: list[UploadedAsset],
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+) -> QuestionDetectionResult:
+    """Detect and conservatively transcribe main questions and subparts in uploaded images/PDFs."""
+    if not question_assets:
+        raise GeminiTutorError("Upload at least one question image or PDF before detecting questions.", category="input")
+
+    prompt = f"""
+You are inspecting uploaded Singapore secondary mathematics question pages for {track_label}.
+Your job in this pass is ONLY to detect the question structure and transcribe enough text so the student can choose a question.
+Do not solve the questions and do not assess any student working.
+
+COUNTING RULES
+- Count MAIN questions by their printed top-level numbering (for example 1, 2, 3, 7, 8).
+- Do NOT count subparts such as (a), (b), (i), or (ii) as separate main questions.
+- Example: Question 5 with parts (a), (b)(i), and (b)(ii) is 1 main question with 3 listed subparts.
+- If two uploaded images show different portions of the same numbered main question, merge them into one detected question.
+- If numbering is cropped or genuinely unreadable, use "?" and lower confidence instead of inventing a number.
+- If a possible extra question is cut off or too unclear to confirm, do not include it in questions; increase possible_additional_question_count instead.
+
+TRANSCRIPTION RULES
+- Transcribe conservatively. Do not invent missing numbers, labels, units, diagrams, or conditions.
+- Preserve mathematical meaning and normal Singapore O-Level / N-Level notation.
+- Put mathematical expressions in LaTeX using \\( ... \\) inline or \\[ ... \\] for display maths.
+- Never use dollar-sign math delimiters.
+- page_numbers are 1-based PDF page numbers where visible; for separate uploaded images, use their 1-based upload order.
+- topic_hint should be short, for example Algebra, Coordinate geometry, Trigonometry, Statistics, or Probability.
+- Add a note when a diagram/table is essential but cannot be fully represented in the transcription.
+
+Return all confirmed main questions in visual/document order.
+""".strip()
+
+    interaction_input: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for index, asset in enumerate(question_assets, 1):
+        interaction_input.append({"type": "text", "text": f"Uploaded question source {index}: {asset.name}"})
+        interaction_input.append(_encode_asset(asset))
+
+    active_client = client or _make_client(api_key)
+    try:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=interaction_input,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": QuestionDetectionResult.model_json_schema(),
+            },
+        )
+        result = QuestionDetectionResult.model_validate_json(interaction.output_text)
+    except ValidationError as exc:
+        raise GeminiTutorError(
+            "Gemini could not return a reliable question list for this upload. Try a clearer image or a smaller set of pages.",
+            category="format",
+        ) from exc
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
+
+    # Keep the confirmed count internally consistent with the structured list.
+    result.main_question_count = len(result.questions)
+    return result
 
 
 def analyze_submission(
