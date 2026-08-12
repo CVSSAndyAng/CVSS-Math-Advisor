@@ -92,6 +92,17 @@ def get_api_key(explicit_key: str | None = None) -> str | None:
 def get_model(explicit_model: str | None = None) -> str:
     return (explicit_model or os.getenv("GEMINI_MODEL") or DEFAULT_MODEL).strip()
 
+def clean_latex_delimiters(text: str) -> str:
+    if not text:
+        return text
+
+    # Convert Gemini-style $equation$ into plain-text equation.
+    # Only targets content that looks mathematical.
+    return re.sub(
+        r"\$([^$\n]*[=+\-*/^()a-zA-Z][^$\n]*)\$",
+        r"\1",
+        text,
+    )
 
 def _make_client(api_key: str | None = None):
     try:
