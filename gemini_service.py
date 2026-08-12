@@ -47,6 +47,58 @@ class QuestionDetectionResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class QuestionFeasibilityIssue(BaseModel):
+    category: Literal[
+        "missing_information",
+        "ambiguous_wording",
+        "contradiction",
+        "invalid_or_impossible_values",
+        "diagram_or_table_issue",
+        "multiple_interpretations",
+        "suspected_typo",
+        "domain_or_condition_issue",
+        "syllabus_mismatch",
+        "other",
+    ]
+    severity: Literal["warning", "blocking"]
+    description: str = Field(description=r"Concise explanation of the issue. Mathematical expressions may use \( ... \) delimiters.")
+    suggested_fix: str = Field(
+        default="",
+        description="A conservative suggested correction or clarification when one is reasonably clear; otherwise empty.",
+    )
+
+
+class QuestionFeasibilityResult(BaseModel):
+    status: Literal["feasible", "feasible_with_caveats", "needs_clarification", "infeasible"]
+    can_analyse_student_work: bool = Field(
+        description="True only when the question is sufficiently complete and coherent for reliable marking of student working."
+    )
+    interpreted_question: str = Field(
+        description=r"Conservative interpretation of the selected question. Use \( ... \) or \[ ... \] for mathematics and no dollar-sign delimiters."
+    )
+    answerability: Literal[
+        "well_defined",
+        "multiple_answers_intended",
+        "underdetermined",
+        "contradictory",
+        "unclear",
+    ]
+    required_information_present: bool
+    diagram_or_table_sufficient: bool = Field(
+        description="True when no diagram/table is needed, or when any required diagram/table information is sufficiently visible and usable."
+    )
+    syllabus_fit: Literal["within_selected_track", "possibly_outside_selected_track", "unclear"]
+    issues: list[QuestionFeasibilityIssue] = Field(default_factory=list)
+    suspected_corrections: list[str] = Field(
+        default_factory=list,
+        description="Only high-confidence possible corrections; do not silently apply them during later marking.",
+    )
+    action_needed: str = Field(
+        description="What the student/teacher should do next. Keep concise; state that no action is needed when the question is ready."
+    )
+    confidence: Literal["high", "medium", "low"]
+
+
 class ReasoningStep(BaseModel):
     line_number: int = Field(description="1-based step number in the student's visible working")
     student_step: str = Field(
@@ -380,6 +432,95 @@ Return all confirmed main questions in visual/document order.
     result.main_question_count = len(result.questions)
     return result
 
+
+
+def assess_question_feasibility(
+    *,
+    track_label: str,
+    question_text: str,
+    question_assets: list[UploadedAsset] | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+) -> QuestionFeasibilityResult:
+    """Check whether a selected question is coherent and answerable before student working is analysed."""
+    question_assets = question_assets or []
+    if not question_text.strip() and not question_assets:
+        raise GeminiTutorError("Provide the question as text or an upload before checking feasibility.", category="input")
+
+    prompt = rf"""
+You are performing a PRE-MARKING QUALITY CHECK on a Singapore secondary mathematics question for {track_label}.
+Inspect the QUESTION ONLY. Do not analyse, infer, or ask for the student's solution in this pass.
+
+SELECTED QUESTION TEXT (may include an explicit selected-question marker from a worksheet):
+{question_text.strip() or '[No typed/selected question text supplied; inspect the uploaded question source]'}
+
+GOAL
+Decide whether the selected question, exactly as presented, is sufficiently coherent and complete for reliable analysis of a student's working.
+Do enough independent mathematics to verify the givens and task, but do NOT provide a full worked solution or reveal the answer unless a tiny calculation is necessary to explain a defect.
+
+CHECK EVERY RELEVANT PART
+- Confirm that every subpart has enough information to be answered as written.
+- Check internal consistency of numbers, coordinates, units, labels, domains, inequalities, ranges, diagrams, tables, graphs, and stated conditions.
+- Check for cropped/missing diagram information, unreadable labels, missing definitions, contradictory givens, impossible constructions, malformed expressions, or a likely typo that changes the mathematics.
+- Check whether the requested result is mathematically meaningful and sufficiently specified.
+- If a diagram/table/graph is essential, decide whether the visible information is sufficient.
+- Check broad fit with the selected Singapore O-Level / N-Level track; a possible syllabus mismatch is usually a warning, not automatically a blocking defect.
+- Focus ONLY on the selected question when the text contains a selected-question marker. Ignore unrelated questions visible elsewhere in uploaded pages.
+
+IMPORTANT JUDGEMENT RULES
+- A difficult question is not infeasible merely because it is hard.
+- A question may legitimately have multiple answers, no real solution, an impossible case, or require a proof/disproof. If that outcome is a mathematically meaningful answer to the task, the question can still be feasible.
+- Do not demand a unique numerical answer when the wording intentionally allows multiple valid answers.
+- Do not silently repair a suspected typo. Report it, and place a high-confidence candidate repair in suspected_corrections when appropriate.
+- If handwriting/printing in the QUESTION is unclear, lower confidence and use needs_clarification when reliable marking would depend on guessing.
+
+STATUS DEFINITIONS
+- feasible: complete, coherent, and ready for reliable student-work analysis; no material issue.
+- feasible_with_caveats: still reliably answerable, but there is a non-blocking warning (for example a harmless wording issue or possible syllabus mismatch).
+- needs_clarification: missing, cropped, ambiguous, or unreadable information prevents reliable marking until clarified.
+- infeasible: the question as written is internally contradictory, mathematically broken, or cannot support a meaningful answer to the task.
+
+Set can_analyse_student_work=true ONLY for feasible or feasible_with_caveats when there is no blocking issue.
+Use \( ... \) for inline mathematics and \[ ... \] for display mathematics. Never use dollar-sign delimiters.
+Keep explanations concise and student/teacher friendly.
+""".strip()
+
+    interaction_input: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for index, asset in enumerate(question_assets, 1):
+        interaction_input.append({"type": "text", "text": f"Question source {index}: {asset.name}"})
+        interaction_input.append(_encode_asset(asset))
+
+    active_client = client or _make_client(api_key)
+    try:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=interaction_input,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": QuestionFeasibilityResult.model_json_schema(),
+            },
+        )
+        result = QuestionFeasibilityResult.model_validate_json(interaction.output_text)
+    except ValidationError as exc:
+        raise GeminiTutorError(
+            "Gemini could not return a reliable feasibility check for this question. Try a clearer question image or re-enter the question text.",
+            category="format",
+        ) from exc
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
+
+    has_blocking = any(issue.severity == "blocking" for issue in result.issues)
+    if result.status in {"needs_clarification", "infeasible"} or has_blocking:
+        result.can_analyse_student_work = False
+    elif result.status in {"feasible", "feasible_with_caveats"}:
+        result.can_analyse_student_work = True
+
+    if has_blocking and result.status == "feasible":
+        result.status = "needs_clarification"
+    return result
 
 
 def _validate_practice_question_completeness(question: TargetedPracticeQuestion) -> None:

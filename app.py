@@ -16,9 +16,11 @@ from gemini_service import (
     GeminiTutorError,
     PracticeEvaluation,
     QuestionDetectionResult,
+    QuestionFeasibilityResult,
     TargetedPracticeQuestion,
     UploadedAsset,
     analyze_submission,
+    assess_question_feasibility,
     detect_questions_in_assets,
     evaluate_practice_attempt,
     generate_followup_practice_question,
@@ -614,6 +616,9 @@ def init_state() -> None:
         "ai_question_detection_error": "",
         "ai_question_file_signature": "",
         "ai_selected_question_index": 0,
+        "ai_question_feasibility": None,
+        "ai_question_feasibility_error": "",
+        "ai_question_feasibility_signature": "",
         "ai_practice_stage": 0,
         "ai_practice_current_question": None,
         "ai_practice_evaluation": None,
@@ -941,6 +946,66 @@ def render_question_detection(detection: QuestionDetectionResult) -> int:
     return int(selected)
 
 
+def question_for_selected_analysis(
+    typed_text: str,
+    detection: QuestionDetectionResult | None,
+    selected_index: int,
+) -> str:
+    parts = [typed_text.strip()]
+    if detection is not None and detection.questions:
+        parts.append(detected_question_context(detection, selected_index))
+    return "\n\n".join(part for part in parts if part)
+
+
+def question_feasibility_signature(question_text: str, files: list[Any] | None, selected_index: int) -> str:
+    return f"{question_text.strip()}||{question_file_signature(files)}||selected={selected_index}"
+
+
+def render_question_feasibility(result: QuestionFeasibilityResult) -> None:
+    labels = {
+        "feasible": "Ready to analyse",
+        "feasible_with_caveats": "Ready with caveats",
+        "needs_clarification": "Clarification needed",
+        "infeasible": "Question issue detected",
+    }
+    message = labels.get(result.status, result.status.replace("_", " ").title())
+    if result.status == "feasible":
+        st.success(f"Question feasibility: {message}.")
+    elif result.status == "feasible_with_caveats":
+        st.warning(f"Question feasibility: {message}.")
+    else:
+        st.error(f"Question feasibility: {message}. Student-working analysis is blocked until the question is clarified or corrected.")
+
+    render_math_text(f"**Interpreted question:** {result.interpreted_question}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Answerability", result.answerability.replace("_", " ").title())
+    c2.metric("Information", "Complete" if result.required_information_present else "Missing / unclear")
+    c3.metric("Diagram / table", "Sufficient" if result.diagram_or_table_sufficient else "Needs attention")
+    st.caption(
+        f"Syllabus fit: {result.syllabus_fit.replace('_', ' ').title()} · "
+        f"Feasibility confidence: {result.confidence.title()}"
+    )
+
+    if result.issues:
+        st.markdown("**Question issues / warnings**")
+        for issue in result.issues:
+            label = "Blocking" if issue.severity == "blocking" else "Warning"
+            if issue.severity == "blocking":
+                st.error(f"{label} — {issue.description}")
+            else:
+                st.warning(f"{label} — {issue.description}")
+            if issue.suggested_fix:
+                render_math_text(f"**Suggested clarification/fix:** {issue.suggested_fix}")
+
+    if result.suspected_corrections:
+        st.markdown("**Possible corrections to verify**")
+        for item in result.suspected_corrections:
+            render_math_text(f"• {item}")
+
+    if result.action_needed:
+        render_math_text(f"**Next action:** {result.action_needed}")
+
+
 def offline_evidence_for(question_text: str, working_text: str) -> tuple[str, AttemptResult | None]:
     if not question_text.strip() or not working_text.strip():
         return "", None
@@ -1052,6 +1117,11 @@ with ai_tab:
         st.session_state.ai_question_detection = None
         st.session_state.ai_question_detection_error = ""
         st.session_state.ai_selected_question_index = 0
+        st.session_state.ai_question_feasibility = None
+        st.session_state.ai_question_feasibility_error = ""
+        st.session_state.ai_question_feasibility_signature = ""
+        st.session_state.ai_analysis = None
+        clear_ai_practice_state()
         st.session_state.pop("ai_detected_question_selector", None)
 
     w_text, w_input_mode, w_offline_text = working_input(
@@ -1083,6 +1153,9 @@ with ai_tab:
         if st.button("Detect questions in uploaded file(s)", use_container_width=True):
             st.session_state.ai_question_detection = None
             st.session_state.ai_question_detection_error = ""
+            st.session_state.ai_question_feasibility = None
+            st.session_state.ai_question_feasibility_error = ""
+            st.session_state.ai_question_feasibility_signature = ""
             st.session_state.pop("ai_detected_question_selector", None)
             if not consent:
                 st.session_state.ai_question_detection_error = (
@@ -1111,21 +1184,85 @@ with ai_tab:
         if detection is not None:
             selected_detection_index = render_question_detection(detection)
 
-    if st.button("Analyse with Gemini", type="primary", use_container_width=True):
+    detection = st.session_state.ai_question_detection
+    question_for_analysis = question_for_selected_analysis(q_text, detection, selected_detection_index)
+    current_feasibility_signature = question_feasibility_signature(
+        question_for_analysis, q_files, selected_detection_index
+    )
+    if (
+        st.session_state.ai_question_feasibility_signature
+        and st.session_state.ai_question_feasibility_signature != current_feasibility_signature
+    ):
+        st.session_state.ai_question_feasibility = None
+        st.session_state.ai_question_feasibility_error = ""
+        st.session_state.ai_question_feasibility_signature = ""
+        st.session_state.ai_analysis = None
+        clear_ai_practice_state()
+
+    st.markdown("### Check the question before marking")
+    st.write(
+        "Before looking at the student's solution, Gemini checks whether the selected question is complete, internally consistent, "
+        "mathematically meaningful, and sufficiently clear to mark reliably."
+    )
+    if st.button("Check question feasibility", use_container_width=True):
+        st.session_state.ai_question_feasibility = None
+        st.session_state.ai_question_feasibility_error = ""
+        st.session_state.ai_analysis = None
+        clear_ai_practice_state()
+        if not consent:
+            st.session_state.ai_question_feasibility_error = (
+                "Confirm the Gemini data-sharing acknowledgement before checking the question."
+            )
+        elif not question_for_analysis.strip() and not q_files:
+            st.session_state.ai_question_feasibility_error = "Provide the question as text or an upload first."
+        else:
+            try:
+                assets_q = uploaded_assets(q_files)
+                with st.spinner("Checking the question for missing information, contradictions, ambiguity, and mathematical feasibility..."):
+                    feasibility = assess_question_feasibility(
+                        track_label=track_label,
+                        question_text=question_for_analysis,
+                        question_assets=assets_q,
+                        api_key=explicit_key,
+                        model=model,
+                    )
+                st.session_state.ai_question_feasibility = feasibility
+                st.session_state.ai_question_feasibility_signature = current_feasibility_signature
+                st.rerun()
+            except GeminiTutorError as exc:
+                st.session_state.ai_question_feasibility_error = str(exc)
+                st.rerun()
+
+    if st.session_state.ai_question_feasibility_error:
+        st.error(st.session_state.ai_question_feasibility_error)
+
+    feasibility: QuestionFeasibilityResult | None = st.session_state.ai_question_feasibility
+    if feasibility is not None:
+        render_question_feasibility(feasibility)
+
+    feasibility_ready = bool(
+        feasibility is not None
+        and feasibility.can_analyse_student_work
+        and st.session_state.ai_question_feasibility_signature == current_feasibility_signature
+    )
+    if not feasibility_ready:
+        st.info("Student-working analysis remains locked until the current question passes the feasibility check.")
+
+    if st.button(
+        "Analyse student working with Gemini",
+        type="primary",
+        use_container_width=True,
+        disabled=not feasibility_ready,
+    ):
         st.session_state.ai_analysis = None
         st.session_state.ai_error = ""
         st.session_state.ai_fallback_result = None
         clear_ai_practice_state()
         if not consent:
             st.error("Confirm the Gemini data-sharing acknowledgement before sending the submission.")
+        elif not feasibility_ready:
+            st.error("Run the question feasibility check and resolve any blocking question issue before analysing the student's work.")
         else:
-            question_for_analysis = q_text
-            detection = st.session_state.ai_question_detection
-            if detection is not None and detection.questions:
-                question_for_analysis = "\n\n".join(
-                    part for part in [q_text.strip(), detected_question_context(detection, selected_detection_index)] if part
-                )
-
             # The visual equation editor also returns ASCIIMath for the deterministic algebra fallback.
             evidence, offline_result = offline_evidence_for(question_for_analysis, w_offline_text)
             working_for_gemini = (
