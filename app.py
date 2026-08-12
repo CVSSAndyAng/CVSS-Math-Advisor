@@ -394,6 +394,7 @@ def practice_attempt_is_secure(result: PracticeEvaluation) -> bool:
         bool(getattr(result, "is_correct", False))
         and bool(getattr(result, "all_required_parts_complete", False))
         and not list(getattr(result, "missing_or_incorrect_parts", []) or [])
+        and not list(getattr(result, "presentation_errors", []) or [])
         and int(getattr(result, "answer_score", 0) or 0) >= 80
         and int(getattr(result, "reasoning_score", 0) or 0) >= 80
         and getattr(result, "mastery", "") in {"Secure", "Strong"}
@@ -525,11 +526,22 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
             "unsupported": "⚪",
         }
         for step in a.steps:
-            with st.expander(f"{icons.get(step.status, '•')} Step {step.line_number}"):
-                render_math_text(f"**Student step:** {step.student_step}")
-                render_math_text(f"**What the step appears to be doing:** {step.logic_inferred}")
+            presentation_flag = bool(getattr(step, "presentation_error", False))
+            title_icon = "⚠️" if presentation_flag else icons.get(step.status, "•")
+            with st.expander(f"{title_icon} Step {step.line_number}"):
+                st.markdown("**Student step**")
+                render_mathio(step.student_step)
+                if presentation_flag:
+                    st.error("Presentation error — this written line does not form a clear mathematical statement.")
+                    presentation_explanation = getattr(step, "presentation_error_explanation", "")
+                    if presentation_explanation:
+                        render_math_text(presentation_explanation)
+                st.markdown(f"**What the step appears to be doing:** {step.logic_inferred}")
                 st.write(f"**Issue type:** {step.issue_type}")
-                render_math_text(step.feedback)
+                st.write(step.feedback)
+                supporting_math = list(getattr(step, "supporting_math", []) or [])
+                for formula in supporting_math:
+                    render_mathio(formula)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -547,8 +559,10 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
             render_math_text(hint)
     with st.expander("Reveal corrected path and answer"):
         for i, line in enumerate(a.corrected_path, 1):
-            render_math_text(f"{i}. {line}")
-        render_math_text(f"**Final answer:** {a.final_answer}")
+            st.caption(f"Step {i}")
+            render_mathio(line)
+        st.markdown("**Final answer**")
+        render_mathio(a.final_answer)
 
 
 def render_practice_evaluation(e: PracticeEvaluation) -> None:
@@ -566,12 +580,18 @@ def render_practice_evaluation(e: PracticeEvaluation) -> None:
             render_math_text(f"• {item}")
     if e.missing_or_incorrect_parts:
         st.warning("Parts still to complete correctly: " + ", ".join(e.missing_or_incorrect_parts))
+    presentation_errors = list(getattr(e, "presentation_errors", []) or [])
+    if presentation_errors:
+        st.markdown("**Presentation errors**")
+        for item in presentation_errors:
+            st.warning(item)
     if e.gaps:
         st.markdown("**Gaps**")
         for item in e.gaps:
             render_math_text(f"• {item}")
     render_math_text(f"**Next hint:** {e.next_hint}")
-    render_math_text(f"**Corrected next step:** {e.corrected_next_step}")
+    st.markdown("**Corrected next step**")
+    render_mathio(e.corrected_next_step)
 
 
 def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:

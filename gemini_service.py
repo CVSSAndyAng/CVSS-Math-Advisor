@@ -49,11 +49,40 @@ class QuestionDetectionResult(BaseModel):
 
 class ReasoningStep(BaseModel):
     line_number: int = Field(description="1-based step number in the student's visible working")
-    student_step: str = Field(description="The student's step, transcribed conservatively")
+    student_step: str = Field(
+        description=(
+            "The student's visible mathematical step as MathIO-ready raw LaTeX with no $ or \\( \\) delimiters. "
+            "Use \\text{...} only for short labels/words that are actually visible in the step."
+        )
+    )
     status: Literal["correct", "partly_correct", "incorrect", "unclear", "unsupported"]
-    logic_inferred: str = Field(description="What this visible step appears to be trying to do")
-    issue_type: str = Field(description="Short category such as algebra, arithmetic, concept, interpretation, notation, or none")
-    feedback: str = Field(description="Specific feedback about this step")
+    logic_inferred: str = Field(description="Plain-language description of what this visible step appears to be trying to do; do not put raw LaTeX commands in this prose field")
+    issue_type: Literal[
+        "none",
+        "algebra",
+        "arithmetic",
+        "concept",
+        "interpretation",
+        "notation",
+        "presentation",
+        "incomplete",
+        "unclear",
+        "other",
+    ] = Field(description="Primary issue category for this step")
+    presentation_error: bool = Field(
+        description=(
+            "True only when the written line itself is not a coherent mathematical statement because notation, operators, "
+            "brackets, equality, or structure are missing/ambiguous. Do not use this for an ordinary conceptual or arithmetic error."
+        )
+    )
+    presentation_error_explanation: str = Field(
+        description="If presentation_error is true, explain exactly what makes the written line mathematically ill-formed or ambiguous; otherwise return an empty string."
+    )
+    feedback: str = Field(description="Specific plain-language feedback about this step; do not put raw LaTeX commands in this prose field")
+    supporting_math: list[str] = Field(
+        default_factory=list,
+        description="Optional formulas/equations that support the feedback, each as MathIO-ready raw LaTeX with no delimiters",
+    )
 
 
 class TargetedPracticeQuestion(BaseModel):
@@ -84,8 +113,12 @@ class GeminiAnalysis(BaseModel):
     misconception_or_gap: str
     diagnostic_question: str
     hint_ladder: list[str] = Field(description="Three progressively stronger hints")
-    corrected_path: list[str]
-    final_answer: str
+    corrected_path: list[str] = Field(
+        description="Corrected mathematical steps as MathIO-ready raw LaTeX with no delimiters; use \\text{...} only for short labels/units"
+    )
+    final_answer: str = Field(
+        description="Final answer as MathIO-ready raw LaTeX with no delimiters; use \\text{...} for short labels/units when needed"
+    )
     practice_questions: list[TargetedPracticeQuestion] = Field(description="Exactly three: Near transfer, Varied context, Stretch")
 
 
@@ -103,8 +136,17 @@ class PracticeEvaluation(BaseModel):
     first_logic_break_explanation: str
     strengths: list[str]
     gaps: list[str]
+    presentation_errors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Concise descriptions of any student working lines that are mathematically ill-formed or ambiguous because of presentation/notation. "
+            "Do not include ordinary conceptual or arithmetic mistakes here."
+        ),
+    )
     next_hint: str
-    corrected_next_step: str
+    corrected_next_step: str = Field(
+        description="The next corrected mathematical step as MathIO-ready raw LaTeX with no delimiters"
+    )
     mastery: Literal["Beginning", "Developing", "Secure", "Strong"]
     confidence: Literal["high", "medium", "low"]
 
@@ -199,6 +241,12 @@ SAFETY AND RELIABILITY
 - If handwriting, a diagram, or a step is genuinely unclear, say so and lower confidence instead of inventing it.
 - Identify the earliest material logic break, not just the final wrong answer.
 - Distinguish conceptual/procedural issues from arithmetic slips.
+- Separately check PRESENTATION: whether each written line is a coherent mathematical statement.
+- A presentation error means the student's written step is mathematically ill-formed or ambiguous because an operator, equality sign, bracket, exponent structure, fraction structure, variable, or other essential notation is missing or misplaced.
+- Examples of presentation errors include `3x + = 12`, `x = = 4`, unmatched brackets, an expression with no operator between terms, or an equality chain whose notation does not form a readable mathematical statement.
+- Do NOT label a well-formed but mathematically wrong step as a presentation error. For example, using the wrong index law is a concept error if the written expression itself is coherent.
+- If handwriting is too unclear to know what was written, use status `unclear` rather than inventing a presentation error.
+- When presentation_error=true, set issue_type=`presentation` and explain exactly what notation makes the line invalid or ambiguous.
 - A different valid method is acceptable.
 - Provide exactly three targeted practice questions: Near transfer, Varied context, and Stretch.
 - Each practice question must be original, solvable, syllabus-appropriate, and have a verified answer and worked solution.
@@ -226,9 +274,12 @@ OUTPUT GUIDANCE
 - practice_questions must contain exactly three items, one of each required kind.
 - Every practice question must include required_parts, and its answer/worked_solution must solve every required part.
 - Multi-part answers and worked solutions must explicitly label each part so completeness can be verified.
+- ReasoningStep.student_step must be MathIO-ready raw LaTeX with NO delimiters so the app renders the student's line in equation view.
+- ReasoningStep.logic_inferred and ReasoningStep.feedback must be plain explanatory prose without raw LaTeX commands. Put formulas/examples for a step in ReasoningStep.supporting_math as MathIO-ready raw LaTeX with no delimiters.
+- corrected_path and final_answer must also be MathIO-ready raw LaTeX with NO delimiters.
 - Reference answer/worked_solution fields are the exception to the delimiter rule: return MathIO-ready LaTeX only, with no math delimiters.
 - Keep feedback concise and actionable for a secondary-school student.
-- When a field contains mathematics, wrap only the mathematical part in \\( ... \\) or \\[ ... \\].
+- In other prose fields such as strengths, gaps, and explanations, wrap only the mathematical part in \\( ... \\) or \\[ ... \\].
 """.strip()
 
     inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
@@ -461,6 +512,12 @@ The original gap this practice is testing:
 Student working:
 {student_working}
 
+PRESENTATION / MATHEMATICAL-SENSE CHECK
+- Check whether every submitted line is a coherent mathematical statement, separately from checking whether it is mathematically correct.
+- If a line is ill-formed or ambiguous because essential notation, operators, equality signs, brackets, fraction structure, or exponent structure are missing or misplaced, add a concise item to presentation_errors.
+- Do not call a normal conceptual, algebraic, or arithmetic mistake a presentation error when the written expression itself is coherent.
+- If a presentation error prevents the reasoning from being verified, is_correct must be false and mastery must be no higher than Developing until the student rewrites the step clearly.
+
 MULTI-PART MASTERY RULES
 - A multi-part question is NOT correct unless every required part is attempted and correct.
 - If even one required part is missing, incomplete, or wrong: set all_required_parts_complete=false, set is_correct=false, keep answer_score below 80, and set mastery no higher than Developing.
@@ -471,7 +528,8 @@ MULTI-PART MASTERY RULES
 
 Return concise tutoring feedback. first_logic_break_step must be 0 if no material logic error is found.
 A correct final answer with unsupported or incorrect reasoning should not automatically receive 100 for reasoning.
-Write mathematical expressions in LaTeX using \\( ... \\) inline or \\[ ... \\] for display maths. Use textbook fractions, roots, indices, and subscripts. Never use dollar-sign delimiters.
+corrected_next_step must be MathIO-ready raw LaTeX with no delimiters.
+In prose feedback fields, write mathematical expressions in LaTeX using \\( ... \\) inline or \\[ ... \\] for display maths. Use textbook fractions, roots, indices, and subscripts. Never use dollar-sign delimiters.
 """.strip()
 
     active_client = client or _make_client(api_key)
