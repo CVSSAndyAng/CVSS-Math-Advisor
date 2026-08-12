@@ -56,7 +56,16 @@ st.markdown(
 MAX_FILE_BYTES = 12 * 1024 * 1024
 MAX_TOTAL_BYTES = 30 * 1024 * 1024
 
+def clean_math_text(text: str) -> str:
+    if not text:
+        return text
 
+    # Remove paired LaTeX math delimiters used around equations.
+    if text.count("$") == 2:
+        text = text.replace("$", "")
+
+    return text
+    
 def init_state() -> None:
     defaults: dict[str, Any] = {
         "session_id": secrets.token_hex(8),
