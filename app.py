@@ -9,7 +9,7 @@ from typing import Any
 
 import streamlit as st
 
-from ai_tutor.gemini_service import (
+from gemini_service import (
     DEFAULT_MODEL,
     GeminiAnalysis,
     GeminiTutorError,
@@ -20,7 +20,7 @@ from ai_tutor.gemini_service import (
     evaluate_practice_attempt,
     get_api_key,
 )
-from ai_tutor.offline_engine import (
+from offline_engine import (
     TRACKS,
     AttemptResult,
     Question,
@@ -75,6 +75,14 @@ def init_state() -> None:
 
 
 init_state()
+
+# Streamlit Community Cloud stores app secrets in st.secrets.
+# Copy the Gemini key into the process environment so the service layer can read it.
+try:
+    if "GEMINI_API_KEY" in st.secrets and not os.getenv("GEMINI_API_KEY"):
+        os.environ["GEMINI_API_KEY"] = str(st.secrets["GEMINI_API_KEY"])
+except Exception:
+    pass
 
 
 def track_code(label: str) -> str:
@@ -292,7 +300,7 @@ with st.sidebar:
     explicit_key = st.text_input(
         "Gemini API key (optional here)",
         type="password",
-        help="Prefer Replit Secrets with the name GEMINI_API_KEY. Leave this blank when the secret is configured.",
+        help="Prefer Streamlit Community Cloud Secrets with the name GEMINI_API_KEY. Leave this blank when the secret is configured.",
     )
     has_key = bool(get_api_key(explicit_key))
     if has_key:

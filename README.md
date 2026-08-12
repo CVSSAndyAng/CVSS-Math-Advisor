@@ -20,11 +20,11 @@ The interface keeps the 2026 examination labels used by the offline curriculum m
 
 This is an educational tool, not an official SEAB or MOE product.
 
-## Replit: fastest setup
+## Streamlit Community Cloud: fastest setup
 
 ### 1. Import the ZIP
 
-Create a new Replit app and import this ZIP. The included `.replit` file starts Streamlit on port 3000.
+Create a new Streamlit Community Cloud app and import this ZIP. The included `.replit` file starts Streamlit on port 3000.
 
 ### 2. Run without a key first
 
@@ -40,9 +40,9 @@ Google's Gemini API documentation:
 
 https://ai.google.dev/gemini-api/docs/api-key
 
-### 4. Store the key in Replit Secrets
+### 4. Store the key in Streamlit Community Cloud Secrets
 
-In Replit, open **Tools → Secrets** and add:
+In Streamlit Community Cloud, open **Tools → Secrets** and add:
 
 ```text
 Key:   GEMINI_API_KEY
@@ -51,7 +51,7 @@ Value: paste_your_Gemini_key_here
 
 Do not put the key in `app.py`, screenshots, chat messages or a public repository.
 
-Restart the Replit app after adding the secret.
+Restart the Streamlit Community Cloud app after adding the secret.
 
 ### 5. Use Gemini online analysis
 
@@ -132,7 +132,7 @@ cp .env.example .env
 streamlit run app.py
 ```
 
-If using Gemini locally, set `GEMINI_API_KEY` in your environment or `.env` loader of choice. The app itself reads environment variables and Replit Secrets directly.
+If using Gemini locally, set `GEMINI_API_KEY` in your environment or `.env` loader of choice. The app itself reads environment variables and Streamlit Community Cloud Secrets directly.
 
 ## Project structure
 
@@ -161,3 +161,19 @@ singapore_math_gemini_hybrid/
 - Offline free-form checking is intentionally narrower than Gemini. Its strongest free-form capability is typed one-variable equation equivalence checking.
 - Offline generated practice has broader topic coverage because the engine knows the exact mathematical structure of the questions it generates.
 - Generated questions are original templates, not past-year SEAB questions.
+
+
+## GitHub browser-friendly flat layout
+
+This deployment copy intentionally keeps all runtime Python files at the repository root so it can be uploaded through GitHub's **Choose your files** dialog without uploading folders.
+
+Required files:
+- `app.py`
+- `gemini_service.py`
+- `offline_engine.py`
+- `requirements.txt`
+
+Optional documentation:
+- `README.md`
+
+For Streamlit Community Cloud, set `GEMINI_API_KEY` in **App settings → Secrets**.
