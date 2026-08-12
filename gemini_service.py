@@ -372,6 +372,8 @@ ADAPTIVE RULES
 - Use new values and, where suitable for this category, a different representation or surface form.
 - Keep it appropriate to the selected Singapore O-Level / N-Level track.
 - Independently verify the mathematics.
+- Write mathematical expressions in plain text.
+- Do NOT wrap equations or expressions in LaTeX dollar signs such as $...$.
 - Include exactly three progressive hints.
 - Include a verified answer and concise worked solution.
 - Do not reveal the answer inside the question text or the first hint.
