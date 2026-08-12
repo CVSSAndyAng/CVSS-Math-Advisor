@@ -47,6 +47,26 @@ class QuestionDetectionResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class QuestionVisualRegion(BaseModel):
+    source_index: int = Field(
+        ge=1,
+        description="1-based uploaded question source containing the relevant diagram/table/graph region.",
+    )
+    page_number: int = Field(
+        ge=1,
+        default=1,
+        description="1-based page number within a PDF. Use 1 for an image upload.",
+    )
+    box_2d: list[int] = Field(
+        min_length=4,
+        max_length=4,
+        description="[ymin, xmin, ymax, xmax] bounding box normalized to 0..1000.",
+    )
+    label: str = Field(
+        description="Short visible label for this region, e.g. 'UX = 10', 'similarity statement', or 'missing angle label'."
+    )
+
+
 class QuestionFeasibilityIssue(BaseModel):
     category: Literal[
         "missing_information",
@@ -65,6 +85,13 @@ class QuestionFeasibilityIssue(BaseModel):
     suggested_fix: str = Field(
         default="",
         description="A conservative suggested correction or clarification when one is reasonably clear; otherwise empty.",
+    )
+    visual_regions: list[QuestionVisualRegion] = Field(
+        default_factory=list,
+        description=(
+            "Relevant regions in uploaded question images/PDF pages. Use only when the issue can be localized visually; "
+            "include multiple regions when a contradiction depends on more than one label or diagram element."
+        ),
     )
 
 
@@ -465,6 +492,12 @@ CHECK EVERY RELEVANT PART
 - Check for cropped/missing diagram information, unreadable labels, missing definitions, contradictory givens, impossible constructions, malformed expressions, or a likely typo that changes the mathematics.
 - Check whether the requested result is mathematically meaningful and sufficiently specified.
 - If a diagram/table/graph is essential, decide whether the visible information is sufficient.
+- For every issue that can be located in an uploaded image/PDF, populate visual_regions so the app can show the student the exact diagram evidence.
+- visual_regions.source_index is the 1-based Question source number supplied after this prompt.
+- visual_regions.page_number is 1 for an image upload, or the relevant 1-based PDF page.
+- visual_regions.box_2d MUST be [ymin, xmin, ymax, xmax] normalized to 0..1000, tightly covering the relevant label/segment/angle/table cell/graph region.
+- A contradiction can have multiple visual_regions. For example, if two side labels conflict, return one region around each relevant label.
+- Do not invent a box when the issue is purely textual or the location is uncertain; leave visual_regions empty instead.
 - Check broad fit with the selected Singapore O-Level / N-Level track; a possible syllabus mismatch is usually a warning, not automatically a blocking defect.
 - Focus ONLY on the selected question when the text contains a selected-question marker. Ignore unrelated questions visible elsewhere in uploaded pages.
 

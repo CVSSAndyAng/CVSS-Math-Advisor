@@ -4,11 +4,13 @@ import base64
 import json
 import os
 import secrets
+from io import BytesIO
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
 import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
 
 from gemini_service import (
     DEFAULT_MODEL,
@@ -961,7 +963,115 @@ def question_feasibility_signature(question_text: str, files: list[Any] | None, 
     return f"{question_text.strip()}||{question_file_signature(files)}||selected={selected_index}"
 
 
-def render_question_feasibility(result: QuestionFeasibilityResult) -> None:
+def _question_source_image(file_obj: Any, page_number: int = 1) -> Image.Image | None:
+    """Load an uploaded question image or rasterize one PDF page for visual callouts."""
+    if file_obj is None:
+        return None
+    try:
+        data = file_obj.getvalue() if hasattr(file_obj, "getvalue") else bytes(file_obj.read())
+        name = str(getattr(file_obj, "name", "")).lower()
+        mime = str(getattr(file_obj, "type", "")).lower()
+        if name.endswith(".pdf") or mime == "application/pdf":
+            import fitz
+
+            doc = fitz.open(stream=data, filetype="pdf")
+            if doc.page_count < 1:
+                return None
+            page_index = max(0, min(int(page_number) - 1, doc.page_count - 1))
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+            image = Image.open(BytesIO(pix.tobytes("png"))).convert("RGB")
+            doc.close()
+            return image
+        return Image.open(BytesIO(data)).convert("RGB")
+    except Exception:
+        return None
+
+
+def _normalized_box_to_pixels(box: list[int], width: int, height: int) -> tuple[int, int, int, int] | None:
+    if len(box) != 4:
+        return None
+    try:
+        ymin, xmin, ymax, xmax = [max(0, min(1000, int(v))) for v in box]
+    except (TypeError, ValueError):
+        return None
+    if ymax <= ymin or xmax <= xmin:
+        return None
+    x1 = int(xmin / 1000 * width)
+    y1 = int(ymin / 1000 * height)
+    x2 = int(xmax / 1000 * width)
+    y2 = int(ymax / 1000 * height)
+    return x1, y1, x2, y2
+
+
+def _annotate_issue_regions(image: Image.Image, callouts: list[tuple[int, Any, str]]) -> Image.Image:
+    """Draw numbered issue callouts on a copy of the original question diagram/page."""
+    annotated = image.copy()
+    draw = ImageDraw.Draw(annotated)
+    font = ImageFont.load_default()
+    width, height = annotated.size
+    line_width = max(3, round(min(width, height) * 0.006))
+
+    for issue_number, region, severity in callouts:
+        box = _normalized_box_to_pixels(list(getattr(region, "box_2d", []) or []), width, height)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        outline = (190, 30, 45) if severity == "blocking" else (175, 115, 0)
+        draw.rectangle((x1, y1, x2, y2), outline=outline, width=line_width)
+
+        badge = f"{issue_number}"
+        left = max(0, x1)
+        top = max(0, y1 - 24)
+        try:
+            bbox = draw.textbbox((left, top), badge, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        except Exception:
+            tw, th = 10, 12
+        pad = 4
+        draw.rectangle((left, top, left + tw + 2 * pad, top + th + 2 * pad), fill=outline)
+        draw.text((left + pad, top + pad), badge, fill=(255, 255, 255), font=font)
+    return annotated
+
+
+def render_feasibility_visual_map(result: QuestionFeasibilityResult, question_files: list[Any] | None) -> None:
+    """Show the original diagram/page with numbered highlights matching feasibility issues."""
+    if not question_files:
+        return
+
+    grouped: dict[tuple[int, int], list[tuple[int, Any, str]]] = {}
+    for issue_number, issue in enumerate(result.issues, 1):
+        for region in list(getattr(issue, "visual_regions", []) or []):
+            source_index = int(getattr(region, "source_index", 0) or 0)
+            page_number = int(getattr(region, "page_number", 1) or 1)
+            if source_index < 1 or source_index > len(question_files):
+                continue
+            grouped.setdefault((source_index, page_number), []).append((issue_number, region, issue.severity))
+
+    if not grouped:
+        return
+
+    st.markdown("#### Visual issue map")
+    st.caption("Numbered highlights show the parts of the original question diagram/page that support each issue or warning below.")
+    for (source_index, page_number), callouts in sorted(grouped.items()):
+        file_obj = question_files[source_index - 1]
+        image = _question_source_image(file_obj, page_number)
+        if image is None:
+            continue
+        annotated = _annotate_issue_regions(image, callouts)
+        name = str(getattr(file_obj, "name", f"Question source {source_index}"))
+        page_note = f" · page {page_number}" if name.lower().endswith(".pdf") else ""
+        st.image(annotated, caption=f"{name}{page_note}", use_container_width=True)
+        labels = []
+        for issue_number, region, _severity in callouts:
+            label = str(getattr(region, "label", "")).strip()
+            if label:
+                labels.append(f"{issue_number}: {label}")
+        if labels:
+            st.caption(" · ".join(labels))
+
+
+def render_question_feasibility(result: QuestionFeasibilityResult, question_files: list[Any] | None = None) -> None:
     labels = {
         "feasible": "Ready to analyse",
         "feasible_with_caveats": "Ready with caveats",
@@ -986,14 +1096,19 @@ def render_question_feasibility(result: QuestionFeasibilityResult) -> None:
         f"Feasibility confidence: {result.confidence.title()}"
     )
 
+    render_feasibility_visual_map(result, question_files)
+
     if result.issues:
         st.markdown("**Question issues / warnings**")
-        for issue in result.issues:
+        for issue_number, issue in enumerate(result.issues, 1):
             label = "Blocking" if issue.severity == "blocking" else "Warning"
+            visual_note = ""
+            if list(getattr(issue, "visual_regions", []) or []):
+                visual_note = f" · see diagram callout {issue_number}"
             if issue.severity == "blocking":
-                st.error(f"{label} — {issue.description}")
+                st.error(f"{label}{visual_note} — {issue.description}")
             else:
-                st.warning(f"{label} — {issue.description}")
+                st.warning(f"{label}{visual_note} — {issue.description}")
             if issue.suggested_fix:
                 render_math_text(f"**Suggested clarification/fix:** {issue.suggested_fix}")
 
@@ -1238,7 +1353,7 @@ with ai_tab:
 
     feasibility: QuestionFeasibilityResult | None = st.session_state.ai_question_feasibility
     if feasibility is not None:
-        render_question_feasibility(feasibility)
+        render_question_feasibility(feasibility, q_files)
 
     feasibility_ready = bool(
         feasibility is not None
