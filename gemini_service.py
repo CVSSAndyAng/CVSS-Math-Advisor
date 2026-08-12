@@ -481,12 +481,14 @@ def evaluate_practice_attempt(
     practice_question: TargetedPracticeQuestion,
     student_working: str,
     original_gap: str,
+    working_assets: list[UploadedAsset] | None = None,
     api_key: str | None = None,
     model: str | None = None,
     client=None,
 ) -> PracticeEvaluation:
-    if not student_working.strip():
-        raise GeminiTutorError("Enter the student's working before checking it.", category="input")
+    working_assets = working_assets or []
+    if not student_working.strip() and not working_assets:
+        raise GeminiTutorError("Enter, handwrite, photograph, or upload the student's working before checking it.", category="input")
 
     prompt = f"""
 You are marking a Singapore secondary mathematics practice attempt for {track_label}.
@@ -509,8 +511,14 @@ Reference worked solution:
 The original gap this practice is testing:
 {original_gap}
 
-Student working:
-{student_working}
+Student working text (may be blank when handwritten working is supplied as an attachment):
+{student_working or '[No typed working; inspect the attached handwritten working]'}
+
+HANDWRITTEN WORKING ATTACHMENTS
+- Any image/PDF items following this prompt are the student's own practice working.
+- Read the handwriting conservatively and in visible order. Do not invent unclear digits, signs, labels, or steps.
+- For multi-part questions, identify which required part each visible line addresses.
+- If handwriting is genuinely unreadable or a mathematical statement is incomplete/ambiguous, report that limitation rather than assuming a correct step.
 
 PRESENTATION / MATHEMATICAL-SENSE CHECK
 - Check whether every submitted line is a coherent mathematical statement, separately from checking whether it is mathematically correct.
@@ -533,11 +541,15 @@ In prose feedback fields, write mathematical expressions in LaTeX using \\( ... 
 """.strip()
 
     active_client = client or _make_client(api_key)
+    interaction_input: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for asset in working_assets:
+        interaction_input.append({"type": "text", "text": f"Handwritten practice working attachment: {asset.name}"})
+        interaction_input.append(_encode_asset(asset))
     try:
         interaction = active_client.interactions.create(
             model=get_model(model),
             store=False,
-            input=prompt,
+            input=interaction_input,
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
@@ -621,11 +633,15 @@ ADAPTIVE RULES
 """.strip()
 
     active_client = client or _make_client(api_key)
+    interaction_input: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for asset in working_assets:
+        interaction_input.append({"type": "text", "text": f"Handwritten practice working attachment: {asset.name}"})
+        interaction_input.append(_encode_asset(asset))
     try:
         interaction = active_client.interactions.create(
             model=get_model(model),
             store=False,
-            input=prompt,
+            input=interaction_input,
             response_format={
                 "type": "text",
                 "mime_type": "application/json",

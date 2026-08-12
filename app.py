@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
@@ -40,7 +41,7 @@ st.set_page_config(
     page_title="Singapore O/N-Level Math Tutor — Gemini + Offline",
     page_icon="🇸🇬",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
 st.markdown(
@@ -51,6 +52,13 @@ st.markdown(
 .small {font-size:.88rem; opacity:.82;}
 .ok {background: rgba(0,160,90,.08); border-radius:.6rem; padding:.65rem .8rem;}
 .warn {background: rgba(255,170,0,.08); border-radius:.6rem; padding:.65rem .8rem;}
+@media (max-width: 1100px) {
+  .block-container {max-width: 100%; padding-left: 1rem; padding-right: 1rem;}
+}
+@media (pointer: coarse) {
+  button, [role="button"] {min-height: 44px;}
+  input, textarea, select {font-size: 16px !important;}
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -128,6 +136,10 @@ _EQUATION_EDITOR_CSS = """
 @media (max-width: 640px) {
   .omt-editor-row { grid-template-columns: 2.7rem minmax(0,1fr) 2.2rem; }
   .omt-editor-row math-field { font-size: 1.05rem; }
+}
+@media (pointer: coarse) {
+  .omt-editor-row math-field { min-height: 4rem; font-size: 1.2rem; padding: .7rem .75rem; }
+  .omt-add-step, .omt-remove-step { min-height: 44px; min-width: 44px; }
 }
 """
 
@@ -330,6 +342,261 @@ def working_input(
 
     value = st.text_area(label, key=text_key, height=height, placeholder=plain_placeholder)
     return value, mode, value
+
+
+
+_HANDWRITING_HTML = """
+<div class="omt-handwriting-pad">
+  <div class="omt-handwriting-help">Write directly with Apple Pencil, stylus, or finger. Use one line per step and label parts such as (a), (b), (c).</div>
+  <div class="omt-handwriting-toolbar">
+    <button type="button" class="omt-clear-pad">Clear</button>
+  </div>
+  <canvas class="omt-handwriting-canvas" aria-label="Handwritten mathematics working area"></canvas>
+  <div class="omt-handwriting-status" aria-live="polite"></div>
+</div>
+"""
+
+_HANDWRITING_CSS = """
+.omt-handwriting-pad { width: 100%; font-family: var(--st-font, sans-serif); }
+.omt-handwriting-help { opacity: .74; font-size: .88rem; margin: 0 0 .55rem 0; }
+.omt-handwriting-toolbar { display:flex; justify-content:flex-end; margin-bottom:.45rem; }
+.omt-clear-pad { min-height:44px; padding:.45rem .85rem; border:1px solid rgba(128,128,128,.42); border-radius:.5rem; background:transparent; color:var(--st-text-color,#222); }
+.omt-handwriting-canvas { width:100%; height:420px; display:block; background:white; border:1px solid rgba(128,128,128,.45); border-radius:.7rem; touch-action:none; box-sizing:border-box; }
+.omt-handwriting-status { min-height:1rem; margin-top:.35rem; font-size:.78rem; opacity:.7; }
+@media (max-width: 900px) { .omt-handwriting-canvas { height:360px; } }
+@media (pointer: coarse) { .omt-handwriting-canvas { height:46vh; min-height:320px; max-height:520px; } }
+"""
+
+_HANDWRITING_JS = r"""
+function dataUrlIsPresent(value) {
+  return typeof value === 'string' && value.startsWith('data:image/png;base64,') && value.length > 100;
+}
+
+export default function(component) {
+  const { parentElement, data, setStateValue } = component;
+  const canvas = parentElement.querySelector('.omt-handwriting-canvas');
+  const clearButton = parentElement.querySelector('.omt-clear-pad');
+  const status = parentElement.querySelector('.omt-handwriting-status');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let drawing = false;
+  let hasInk = false;
+  let lastX = 0;
+  let lastY = 0;
+  let restoreData = data?.image_data_url || '';
+
+  const setCanvasSize = () => {
+    const rect = canvas.getBoundingClientRect();
+    const ratio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+    const old = hasInk ? canvas.toDataURL('image/png') : restoreData;
+    canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+    canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 2.4;
+    if (dataUrlIsPresent(old)) {
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, rect.width, rect.height);
+        hasInk = true;
+      };
+      img.src = old;
+    }
+  };
+
+  const point = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    return [ev.clientX - rect.left, ev.clientY - rect.top];
+  };
+
+  const emit = () => {
+    if (!hasInk) {
+      setStateValue('image_data_url', '');
+      status.textContent = 'Canvas is blank';
+      return;
+    }
+    setStateValue('image_data_url', canvas.toDataURL('image/png'));
+    status.textContent = 'Handwriting saved';
+  };
+
+  const start = (ev) => {
+    ev.preventDefault();
+    drawing = true;
+    hasInk = true;
+    canvas.setPointerCapture?.(ev.pointerId);
+    [lastX, lastY] = point(ev);
+    ctx.beginPath();
+    ctx.moveTo(lastX, lastY);
+  };
+
+  const move = (ev) => {
+    if (!drawing) return;
+    ev.preventDefault();
+    const [x, y] = point(ev);
+    const pressure = ev.pressure && ev.pressure > 0 ? ev.pressure : 0.5;
+    ctx.lineWidth = 1.8 + pressure * 2.4;
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    lastX = x; lastY = y;
+  };
+
+  const end = (ev) => {
+    if (!drawing) return;
+    ev.preventDefault();
+    drawing = false;
+    ctx.closePath();
+    emit();
+  };
+
+  canvas.onpointerdown = start;
+  canvas.onpointermove = move;
+  canvas.onpointerup = end;
+  canvas.onpointercancel = end;
+  canvas.onpointerleave = (ev) => { if (drawing && ev.buttons === 0) end(ev); };
+
+  clearButton.onclick = () => {
+    const rect = canvas.getBoundingClientRect();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    hasInk = false;
+    restoreData = '';
+    emit();
+  };
+
+  setCanvasSize();
+  const observer = new ResizeObserver(() => setCanvasSize());
+  observer.observe(canvas);
+  parentElement.__omtHandwritingObserver?.disconnect?.();
+  parentElement.__omtHandwritingObserver = observer;
+}
+"""
+
+try:
+    _handwriting_component = st.components.v2.component(
+        "omt_handwriting_pad",
+        html=_HANDWRITING_HTML,
+        css=_HANDWRITING_CSS,
+        js=_HANDWRITING_JS,
+        isolate_styles=False,
+    )
+except Exception:
+    _handwriting_component = None
+
+
+def handwriting_pad(*, key: str) -> UploadedAsset | None:
+    """Return a PNG UploadedAsset from a touch/Pencil handwriting canvas."""
+    if _handwriting_component is None:
+        st.info("The on-screen handwriting pad is unavailable in this browser. Use camera or file upload below.")
+        return None
+    prior = st.session_state.get(key, {})
+    prior_url = prior.get("image_data_url", "") if isinstance(prior, dict) else ""
+    result = _handwriting_component(
+        data={"image_data_url": prior_url},
+        default={"image_data_url": prior_url},
+        key=key,
+        on_image_data_url_change=lambda: None,
+        width="stretch",
+        height="content",
+    )
+    data_url = getattr(result, "image_data_url", "") or prior_url
+    if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
+        return None
+    try:
+        raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
+    except Exception:
+        return None
+    if len(raw) < 200:
+        return None
+    return UploadedAsset(name="ipad-handwritten-working.png", mime_type="image/png", data=raw)
+
+
+
+def targeted_practice_input(
+    label: str,
+    *,
+    key_base: str,
+    height: int = 150,
+) -> tuple[str, str, str, list[UploadedAsset]]:
+    """Collect targeted-practice working from equation editor, text, or iPad handwriting."""
+    mode = st.radio(
+        "Working input method",
+        ["Equation editor", "Handwrite on iPad", "Text working"],
+        horizontal=True,
+        key=f"{key_base}_mode",
+        help=(
+            "Equation editor is best for typed mathematics. Handwrite on iPad lets a student write with Apple Pencil, "
+            "stylus, or finger, take a camera photo, or upload an image/PDF."
+        ),
+    )
+
+    if mode == "Equation editor":
+        latex_lines, ascii_lines = equation_working_editor(label, key=f"{key_base}_equation")
+        explanation = st.text_area(
+            "Optional explanation in words",
+            key=f"{key_base}_explanation",
+            height=80,
+            placeholder="Example: I used the gradient formula first.",
+        )
+        used_latex = [line for line in latex_lines if line]
+        used_ascii = [line for line in ascii_lines if line]
+        working_lines = [f"Step {i}: \\({line}\\)" for i, line in enumerate(used_latex, 1)]
+        if explanation.strip():
+            working_lines.append(f"Student explanation: {explanation.strip()}")
+        return "\n".join(working_lines), mode, "\n".join(used_ascii), []
+
+    if mode == "Text working":
+        value = st.text_area(
+            label,
+            key=f"{key_base}_text",
+            height=height,
+            placeholder="Show all parts and important reasoning steps, not only the final answer.",
+        )
+        return value, mode, value, []
+
+    st.caption(
+        "On iPad, write directly in the pad with Apple Pencil/finger, or use the camera/upload controls. "
+        "For multi-part questions, label the working (a), (b), (c) where possible."
+    )
+    canvas_asset = handwriting_pad(key=f"{key_base}_handwriting")
+    camera_file = st.camera_input(
+        "Take a photo of handwritten working",
+        key=f"{key_base}_camera",
+        help="Allow camera access in Safari/Chrome when prompted.",
+    )
+    upload_files = st.file_uploader(
+        "Or upload handwritten page(s)",
+        type=["png", "jpg", "jpeg", "webp", "pdf"],
+        accept_multiple_files=True,
+        key=f"{key_base}_uploads",
+        help="Useful for multiple pages or an existing photo/PDF from the iPad Files/Photos library.",
+    )
+    explanation = st.text_area(
+        "Optional note to the tutor",
+        key=f"{key_base}_hand_note",
+        height=70,
+        placeholder="Example: My working for (b) continues on the second page.",
+    )
+
+    browser_files: list[Any] = list(upload_files or [])
+    if camera_file is not None:
+        browser_files.insert(0, camera_file)
+    try:
+        assets = uploaded_assets(browser_files)
+    except GeminiTutorError as exc:
+        st.error(str(exc))
+        assets = []
+    if canvas_asset is not None:
+        assets.insert(0, canvas_asset)
+    total = sum(len(asset.data) for asset in assets)
+    if total > MAX_TOTAL_BYTES:
+        st.error("Handwritten working exceeds the app's 30 MB total upload limit.")
+        assets = []
+
+    text = explanation.strip()
+    return text, "Handwritten working", "", assets
 
 def init_state() -> None:
     defaults: dict[str, Any] = {
@@ -957,10 +1224,9 @@ with ai_tab:
                     render_math_text(f"**Hint {i}:** {hint}")
 
             working_key = f"ai_practice_working_{stage_index}_{st.session_state.ai_practice_question_version}"
-            attempt, practice_input_mode, _practice_offline_text = working_input(
+            attempt, practice_input_mode, _practice_offline_text, practice_assets = targeted_practice_input(
                 f"Student working for {kind}",
-                text_key=working_key,
-                format_key=f"{working_key}_format",
+                key_base=working_key,
                 height=150,
             )
 
@@ -972,8 +1238,9 @@ with ai_tab:
                             practice_question=pq,
                             student_working=(
                                 f"[Student working input method: {practice_input_mode}]\n{attempt}"
-                                if attempt.strip() else attempt
+                                if attempt.strip() else f"[Student working input method: {practice_input_mode}]"
                             ),
+                            working_assets=practice_assets,
                             original_gap=analysis.misconception_or_gap,
                             api_key=explicit_key,
                             model=model,
@@ -991,7 +1258,9 @@ with ai_tab:
                         secure and (current_misses == 0 or current_streak >= 2)
                     )
                     st.session_state.ai_practice_evaluation = evaluation
-                    st.session_state.ai_practice_last_working = attempt
+                    st.session_state.ai_practice_last_working = (
+                        attempt if attempt.strip() else f"[{practice_input_mode} submitted; use the marking feedback as the diagnostic summary.]"
+                    )
                     record_ai_practice_history(tcode, pq, evaluation)
                     st.rerun()
                 except GeminiTutorError as exc:
