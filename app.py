@@ -18,6 +18,7 @@ from gemini_service import (
     UploadedAsset,
     analyze_submission,
     evaluate_practice_attempt,
+    generate_followup_practice_question,
     get_api_key,
 )
 from offline_engine import (
@@ -68,6 +69,16 @@ def init_state() -> None:
         "ai_analysis": None,
         "ai_error": "",
         "ai_fallback_result": None,
+        "ai_practice_stage": 0,
+        "ai_practice_current_question": None,
+        "ai_practice_evaluation": None,
+        "ai_practice_last_working": "",
+        "ai_practice_misses": {"Near transfer": 0, "Varied context": 0, "Stretch": 0},
+        "ai_practice_consecutive_correct": {"Near transfer": 0, "Varied context": 0, "Stretch": 0},
+        "ai_practice_completed": {"Near transfer": False, "Varied context": False, "Stretch": False},
+        "ai_practice_ready_to_advance": False,
+        "ai_practice_finished": False,
+        "ai_practice_question_version": 0,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -75,6 +86,43 @@ def init_state() -> None:
 
 
 init_state()
+
+PRACTICE_STAGES = ["Near transfer", "Varied context", "Stretch"]
+
+
+def clear_ai_practice_state() -> None:
+    st.session_state.ai_practice_stage = 0
+    st.session_state.ai_practice_current_question = None
+    st.session_state.ai_practice_evaluation = None
+    st.session_state.ai_practice_last_working = ""
+    st.session_state.ai_practice_misses = {kind: 0 for kind in PRACTICE_STAGES}
+    st.session_state.ai_practice_consecutive_correct = {kind: 0 for kind in PRACTICE_STAGES}
+    st.session_state.ai_practice_completed = {kind: False for kind in PRACTICE_STAGES}
+    st.session_state.ai_practice_ready_to_advance = False
+    st.session_state.ai_practice_finished = False
+    st.session_state.ai_practice_question_version = 0
+
+
+def initialize_ai_practice(analysis: GeminiAnalysis) -> None:
+    clear_ai_practice_state()
+    by_kind = {q.kind: q for q in analysis.practice_questions}
+    st.session_state.ai_practice_current_question = by_kind["Near transfer"]
+
+
+def practice_attempt_is_secure(result: PracticeEvaluation) -> bool:
+    return (
+        result.is_correct
+        and result.answer_score >= 80
+        and result.reasoning_score >= 80
+        and result.mastery in {"Secure", "Strong"}
+    )
+
+
+def initial_practice_question(analysis: GeminiAnalysis, kind: str) -> TargetedPracticeQuestion:
+    for question in analysis.practice_questions:
+        if question.kind == kind:
+            return question
+    raise ValueError(f"No initial practice question found for {kind}")
 
 # Streamlit Community Cloud stores app secrets in st.secrets.
 # Copy the Gemini key into the process environment so the service layer can read it.
@@ -387,9 +435,7 @@ with ai_tab:
         st.session_state.ai_analysis = None
         st.session_state.ai_error = ""
         st.session_state.ai_fallback_result = None
-        for key in list(st.session_state.keys()):
-            if str(key).startswith("ai_practice_eval_"):
-                del st.session_state[key]
+        clear_ai_practice_state()
         if not consent:
             st.error("Confirm the Gemini data-sharing acknowledgement before sending the submission.")
         else:
@@ -409,6 +455,7 @@ with ai_tab:
                         model=model,
                     )
                 st.session_state.ai_analysis = analysis
+                initialize_ai_practice(analysis)
                 st.rerun()
             except GeminiTutorError as exc:
                 st.session_state.ai_error = str(exc)
@@ -428,23 +475,68 @@ with ai_tab:
     if analysis is not None:
         render_ai_analysis(analysis)
         st.markdown("---")
-        st.markdown("## Targeted practice to test understanding")
-        st.write("These three questions are generated from the diagnosed gap, not just from the final answer.")
+        st.markdown("## Adaptive targeted practice")
+        st.write(
+            "Practice is now mastery-gated: the student works through **Near transfer → Varied context → Stretch** in order. "
+            "If a category is not secure, the tutor stays there and generates more questions targeting the same gap."
+        )
+        st.caption(
+            "Mastery rule: a secure first attempt unlocks the next category. After any miss in a category, "
+            "the student must produce two consecutive secure attempts before moving on."
+        )
 
-        for idx, pq in enumerate(analysis.practice_questions):
-            st.markdown(f"### {idx + 1}. {pq.kind}")
+        if st.session_state.ai_practice_current_question is None and not st.session_state.ai_practice_finished:
+            initialize_ai_practice(analysis)
+
+        stage_index = int(st.session_state.ai_practice_stage)
+        completed = st.session_state.ai_practice_completed
+        status_cols = st.columns(3)
+        for i, kind in enumerate(PRACTICE_STAGES):
+            if completed.get(kind):
+                label = f"✅ {kind}"
+                detail = "Mastered"
+            elif not st.session_state.ai_practice_finished and i == stage_index:
+                label = f"🟠 {kind}"
+                detail = "Current focus"
+            else:
+                label = f"🔒 {kind}"
+                detail = "Locked"
+            status_cols[i].markdown(f"**{label}**")
+            status_cols[i].caption(detail)
+
+        if st.session_state.ai_practice_finished:
+            st.success(
+                "Adaptive practice complete: the student demonstrated secure reasoning through Near transfer, "
+                "Varied context, and Stretch."
+            )
+        else:
+            kind = PRACTICE_STAGES[stage_index]
+            pq: TargetedPracticeQuestion = st.session_state.ai_practice_current_question
+            misses = st.session_state.ai_practice_misses[kind]
+            streak = st.session_state.ai_practice_consecutive_correct[kind]
+
+            st.markdown(f"### Current focus: {kind}")
+            if misses:
+                st.warning(
+                    f"This category remains active because the student has had {misses} non-secure attempt(s). "
+                    f"Current recovery streak: {streak}/2 secure attempts."
+                )
             st.markdown(f'<div class="soft-card"><strong>{pq.question}</strong></div>', unsafe_allow_html=True)
             st.caption(f"Target skill: {pq.target_skill}")
             st.write(pq.why_this_tests_understanding)
             with st.expander("Practice hints"):
                 for i, hint in enumerate(pq.hints, 1):
                     st.write(f"**Hint {i}:** {hint}")
+
+            working_key = f"ai_practice_working_{stage_index}_{st.session_state.ai_practice_question_version}"
             attempt = st.text_area(
-                f"Student working for {pq.kind}",
-                key=f"ai_practice_working_{idx}",
-                height=140,
+                f"Student working for {kind}",
+                key=working_key,
+                height=150,
+                placeholder="Show the important reasoning steps, not only the final answer.",
             )
-            if st.button(f"Check {pq.kind} reasoning", key=f"ai_practice_button_{idx}"):
+
+            if st.button(f"Check {kind} reasoning", key=f"ai_practice_check_{stage_index}_{st.session_state.ai_practice_question_version}", type="primary"):
                 try:
                     with st.spinner("Checking the practice reasoning..."):
                         evaluation = evaluate_practice_attempt(
@@ -455,15 +547,85 @@ with ai_tab:
                             api_key=explicit_key,
                             model=model,
                         )
-                    st.session_state[f"ai_practice_eval_{idx}"] = evaluation
+                    secure = practice_attempt_is_secure(evaluation)
+                    if secure:
+                        st.session_state.ai_practice_consecutive_correct[kind] += 1
+                    else:
+                        st.session_state.ai_practice_misses[kind] += 1
+                        st.session_state.ai_practice_consecutive_correct[kind] = 0
+
+                    current_misses = st.session_state.ai_practice_misses[kind]
+                    current_streak = st.session_state.ai_practice_consecutive_correct[kind]
+                    st.session_state.ai_practice_ready_to_advance = bool(
+                        secure and (current_misses == 0 or current_streak >= 2)
+                    )
+                    st.session_state.ai_practice_evaluation = evaluation
+                    st.session_state.ai_practice_last_working = attempt
                     record_ai_practice_history(tcode, pq, evaluation)
                     st.rerun()
                 except GeminiTutorError as exc:
                     st.error(str(exc))
-            evaluation = st.session_state.get(f"ai_practice_eval_{idx}")
+
+            evaluation: PracticeEvaluation | None = st.session_state.ai_practice_evaluation
             if evaluation is not None:
                 render_practice_evaluation(evaluation)
-            with st.expander("Reveal AI reference answer and worked solution"):
+                secure = practice_attempt_is_secure(evaluation)
+                ready = bool(st.session_state.ai_practice_ready_to_advance)
+
+                if ready:
+                    st.success(f"{kind} is secure. The next transfer level can now be unlocked.")
+                    if stage_index < len(PRACTICE_STAGES) - 1:
+                        next_kind = PRACTICE_STAGES[stage_index + 1]
+                        if st.button(f"Continue to {next_kind}", use_container_width=True):
+                            st.session_state.ai_practice_completed[kind] = True
+                            st.session_state.ai_practice_stage = stage_index + 1
+                            st.session_state.ai_practice_current_question = initial_practice_question(analysis, next_kind)
+                            st.session_state.ai_practice_evaluation = None
+                            st.session_state.ai_practice_last_working = ""
+                            st.session_state.ai_practice_ready_to_advance = False
+                            st.session_state.ai_practice_question_version += 1
+                            st.rerun()
+                    else:
+                        if st.button("Complete adaptive practice", use_container_width=True):
+                            st.session_state.ai_practice_completed[kind] = True
+                            st.session_state.ai_practice_finished = True
+                            st.session_state.ai_practice_evaluation = None
+                            st.rerun()
+                else:
+                    if secure:
+                        remaining = max(0, 2 - st.session_state.ai_practice_consecutive_correct[kind])
+                        st.info(
+                            f"Good recovery. Because there was an earlier miss in {kind}, "
+                            f"complete {remaining} more secure attempt(s) in this same category before advancing."
+                        )
+                    else:
+                        st.warning(
+                            f"Stay on {kind}. The next category remains locked until this reasoning is repaired."
+                        )
+
+                    if st.button(f"Generate another {kind} question", use_container_width=True):
+                        try:
+                            with st.spinner(f"Creating another {kind} question focused on the same gap..."):
+                                followup = generate_followup_practice_question(
+                                    track_label=track_label,
+                                    kind=kind,
+                                    previous_question=pq,
+                                    previous_working=st.session_state.ai_practice_last_working,
+                                    evaluation=evaluation,
+                                    original_gap=analysis.misconception_or_gap,
+                                    api_key=explicit_key,
+                                    model=model,
+                                )
+                            st.session_state.ai_practice_current_question = followup
+                            st.session_state.ai_practice_evaluation = None
+                            st.session_state.ai_practice_last_working = ""
+                            st.session_state.ai_practice_ready_to_advance = False
+                            st.session_state.ai_practice_question_version += 1
+                            st.rerun()
+                        except GeminiTutorError as exc:
+                            st.error(str(exc))
+
+            with st.expander("Reveal reference answer and worked solution"):
                 st.markdown(f"**Answer:** {pq.answer}")
                 for i, line in enumerate(pq.worked_solution, 1):
                     st.write(f"{i}. {line}")

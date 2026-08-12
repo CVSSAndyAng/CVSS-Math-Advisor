@@ -177,3 +177,15 @@ Optional documentation:
 - `README.md`
 
 For Streamlit Community Cloud, set `GEMINI_API_KEY` in **App settings → Secrets**.
+
+## Adaptive mastery-gated practice
+
+Gemini-targeted practice now runs in this order:
+
+1. Near transfer
+2. Varied context
+3. Stretch
+
+The next category stays locked until the current category is secure. A secure attempt requires a correct answer, at least 80% answer score, at least 80% reasoning score, and Gemini mastery of `Secure` or `Strong`.
+
+If the student misses a question or the reasoning is not secure, the tutor remains in the same category and generates another question targeting the same diagnosed gap. After any miss within a category, the student must complete two consecutive secure attempts in that same category before advancing. This prevents a single lucky answer from immediately unlocking harder transfer tasks.

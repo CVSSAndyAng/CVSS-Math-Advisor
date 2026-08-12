@@ -314,3 +314,88 @@ A correct final answer with unsupported or incorrect reasoning should not automa
         ) from exc
     except Exception as exc:
         raise _translate_exception(exc) from exc
+
+
+def generate_followup_practice_question(
+    *,
+    track_label: str,
+    kind: Literal["Near transfer", "Varied context", "Stretch"],
+    previous_question: TargetedPracticeQuestion,
+    previous_working: str,
+    evaluation: PracticeEvaluation,
+    original_gap: str,
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+) -> TargetedPracticeQuestion:
+    """Generate another question in the same transfer category after a weak attempt.
+
+    The follow-up should target the same underlying misconception while changing the
+    numbers, representation, or context enough to require fresh reasoning.
+    """
+    prompt = f"""
+You are an adaptive Singapore secondary mathematics tutor for {track_label}.
+Create ONE new practice question in the category: {kind}.
+
+The student is not yet ready to leave this category. The new question must focus on
+repairing the reasoning gap shown below, rather than advancing to another transfer level.
+
+ORIGINAL DIAGNOSED GAP:
+{original_gap}
+
+PREVIOUS {kind.upper()} QUESTION:
+{previous_question.question}
+
+PREVIOUS STUDENT WORKING:
+{previous_working}
+
+MARKING FEEDBACK:
+- correct: {evaluation.is_correct}
+- answer score: {evaluation.answer_score}
+- reasoning score: {evaluation.reasoning_score}
+- mastery: {evaluation.mastery}
+- first logic break: {evaluation.first_logic_break_explanation}
+- gaps: {'; '.join(evaluation.gaps) if evaluation.gaps else '[none listed]'}
+- next hint: {evaluation.next_hint}
+
+ADAPTIVE RULES
+- Keep the output kind exactly "{kind}".
+- Test the SAME core skill/gap again.
+- Do not copy the previous question or merely change one number.
+- Use new values and, where suitable for this category, a different representation or surface form.
+- Keep it appropriate to the selected Singapore O-Level / N-Level track.
+- Independently verify the mathematics.
+- Include exactly three progressive hints.
+- Include a verified answer and concise worked solution.
+- Do not reveal the answer inside the question text or the first hint.
+- For Near transfer, keep the mathematical structure close to the diagnosed skill.
+- For Varied context, preserve the skill but change context/representation meaningfully.
+- For Stretch, add one reasonable extra reasoning demand without introducing an unrelated topic.
+""".strip()
+
+    active_client = client or _make_client(api_key)
+    try:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            input=prompt,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": TargetedPracticeQuestion.model_json_schema(),
+            },
+        )
+        result = TargetedPracticeQuestion.model_validate_json(interaction.output_text)
+    except ValidationError as exc:
+        raise GeminiTutorError(
+            "Gemini returned the follow-up practice question in an unexpected format. Please try again.",
+            category="format",
+        ) from exc
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
+
+    if result.kind != kind:
+        raise GeminiTutorError(
+            f"Gemini generated {result.kind} instead of the required {kind} follow-up. Please try again.",
+            category="format",
+        )
+    return result
