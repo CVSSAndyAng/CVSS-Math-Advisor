@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -112,6 +113,25 @@ class GeminiTutorError(RuntimeError):
     def __init__(self, message: str, category: str = "service") -> None:
         super().__init__(message)
         self.category = category
+
+
+def required_parts_for_question(question: object) -> list[str]:
+    """Return required parts safely, including for practice objects kept from an older Streamlit session."""
+    existing = getattr(question, "required_parts", None)
+    if existing:
+        cleaned = [str(part).strip() for part in existing if str(part).strip()]
+        if cleaned:
+            return cleaned
+
+    text = str(getattr(question, "question", "") or "")
+    # Infer printed parts such as (a), (b), (c) or compound labels such as (a)(i).
+    labels = re.findall(r"\([a-z]\)(?:\s*\([ivx]+\))?", text, flags=re.IGNORECASE)
+    deduped: list[str] = []
+    for label in labels:
+        compact = re.sub(r"\s+", "", label)
+        if compact not in deduped:
+            deduped.append(compact)
+    return deduped or ["whole question"]
 
 
 def get_api_key(explicit_key: str | None = None) -> str | None:
@@ -313,7 +333,7 @@ Return all confirmed main questions in visual/document order.
 
 def _validate_practice_question_completeness(question: TargetedPracticeQuestion) -> None:
     """Reject practice items whose reference material does not cover all required parts."""
-    required = [part.strip() for part in question.required_parts if part and part.strip()]
+    required = required_parts_for_question(question)
     if not required:
         raise GeminiTutorError(
             f"{question.kind} did not identify the parts required for mastery. Please regenerate the analysis.",
@@ -427,7 +447,7 @@ The practice question is:
 {practice_question.question}
 
 Required parts that ALL must be completed for mastery:
-{', '.join(practice_question.required_parts) if practice_question.required_parts else 'Infer every printed part from the question text'}
+{', '.join(required_parts_for_question(practice_question))}
 
 Verified reference answer:
 {practice_question.answer}
@@ -507,7 +527,7 @@ PREVIOUS {kind.upper()} QUESTION:
 {previous_question.question}
 
 PREVIOUS REQUIRED PARTS:
-{', '.join(previous_question.required_parts) if previous_question.required_parts else '[infer from question]'}
+{', '.join(required_parts_for_question(previous_question))}
 
 PREVIOUS STUDENT WORKING:
 {previous_working}

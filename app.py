@@ -22,6 +22,7 @@ from gemini_service import (
     evaluate_practice_attempt,
     generate_followup_practice_question,
     get_api_key,
+    required_parts_for_question,
 )
 from offline_engine import (
     TRACKS,
@@ -387,13 +388,15 @@ def initialize_ai_practice(analysis: GeminiAnalysis) -> None:
 
 
 def practice_attempt_is_secure(result: PracticeEvaluation) -> bool:
+    # Older Streamlit sessions may still contain evaluation objects from the pre-multipart schema.
+    # Treat those as non-secure rather than allowing an accidental category advance.
     return (
-        result.is_correct
-        and result.all_required_parts_complete
-        and not result.missing_or_incorrect_parts
-        and result.answer_score >= 80
-        and result.reasoning_score >= 80
-        and result.mastery in {"Secure", "Strong"}
+        bool(getattr(result, "is_correct", False))
+        and bool(getattr(result, "all_required_parts_complete", False))
+        and not list(getattr(result, "missing_or_incorrect_parts", []) or [])
+        and int(getattr(result, "answer_score", 0) or 0) >= 80
+        and int(getattr(result, "reasoning_score", 0) or 0) >= 80
+        and getattr(result, "mastery", "") in {"Secure", "Strong"}
     )
 
 
@@ -925,8 +928,9 @@ with ai_tab:
             with st.container(border=True):
                 render_math_text(f"**{pq.question}**")
             render_math_text(f"**Target skill:** {pq.target_skill}")
-            if pq.required_parts and pq.required_parts != ["whole question"]:
-                st.caption("All parts required for mastery: " + ", ".join(pq.required_parts))
+            required_parts = required_parts_for_question(pq)
+            if required_parts != ["whole question"]:
+                st.caption("All parts required for mastery: " + ", ".join(required_parts))
             render_math_text(pq.why_this_tests_understanding)
             with st.expander("Practice hints"):
                 for i, hint in enumerate(pq.hints, 1):
