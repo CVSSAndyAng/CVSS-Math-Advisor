@@ -150,6 +150,8 @@ SAFETY AND RELIABILITY
 - A different valid method is acceptable.
 - Provide exactly three targeted practice questions: Near transfer, Varied context, and Stretch.
 - Each practice question must be original, solvable, syllabus-appropriate, and have a verified answer and worked solution.
+- Write mathematical expressions in plain text.
+- Do NOT use LaTeX dollar-sign delimiters such as $...$.
 
 SELECTED TRACK: {track_label}
 QUESTION TEXT (may be blank if supplied by file):
