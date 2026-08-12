@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import os
-import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -92,17 +91,6 @@ def get_api_key(explicit_key: str | None = None) -> str | None:
 def get_model(explicit_model: str | None = None) -> str:
     return (explicit_model or os.getenv("GEMINI_MODEL") or DEFAULT_MODEL).strip()
 
-def clean_latex_delimiters(text: str) -> str:
-    if not text:
-        return text
-
-    # Convert Gemini-style $equation$ into plain-text equation.
-    # Only targets content that looks mathematical.
-    return re.sub(
-        r"\$([^$\n]*[=+\-*/^()a-zA-Z][^$\n]*)\$",
-        r"\1",
-        text,
-    )
 
 def _make_client(api_key: str | None = None):
     try:
@@ -162,8 +150,10 @@ SAFETY AND RELIABILITY
 - A different valid method is acceptable.
 - Provide exactly three targeted practice questions: Near transfer, Varied context, and Stretch.
 - Each practice question must be original, solvable, syllabus-appropriate, and have a verified answer and worked solution.
-- Write mathematical expressions in plain text.
-- Do NOT use LaTeX dollar-sign delimiters such as $...$.
+- Render mathematical expressions in LaTeX notation using \\( ... \\) for inline maths and \\[ ... \\] for display maths.
+- Use textbook notation such as \\frac{{a}}{{b}}, \\sqrt{{x}}, x^2, and x_1.
+- Never use dollar-sign math delimiters such as $...$ or $$...$$ in any output field.
+- Keep ordinary explanatory prose outside the LaTeX delimiters.
 
 SELECTED TRACK: {track_label}
 QUESTION TEXT (may be blank if supplied by file):
@@ -180,6 +170,7 @@ OUTPUT GUIDANCE
 - hint_ladder must contain three hints from light to stronger.
 - practice_questions must contain exactly three items, one of each required kind.
 - Keep feedback concise and actionable for a secondary-school student.
+- When a field contains mathematics, wrap only the mathematical part in \\( ... \\) or \\[ ... \\].
 """.strip()
 
     inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
@@ -195,29 +186,22 @@ OUTPUT GUIDANCE
 def _translate_exception(exc: Exception) -> GeminiTutorError:
     text = str(exc)
     low = text.lower()
-
     if "429" in low or "resource_exhausted" in low or "quota" in low or "rate limit" in low:
         return GeminiTutorError(
             "Gemini free-tier quota or rate limit was reached. The offline tutor is still available; try Gemini again later.",
             category="quota",
         )
-
     if "401" in low or "403" in low or "permission_denied" in low or "api key" in low:
         return GeminiTutorError(
             "Gemini rejected the API key or project permission. Check GEMINI_API_KEY in Streamlit Community Cloud Secrets and restart the app.",
             category="auth",
         )
-
     if "timeout" in low or "timed out" in low or "connection" in low:
         return GeminiTutorError(
             "The Gemini request could not complete because of a network/timeout problem. Offline modes still work.",
             category="network",
         )
-
-    return GeminiTutorError(
-        f"Gemini request failed: {text}",
-        category="service",
-    )
+    return GeminiTutorError(f"Gemini request failed: {text}", category="service")
 
 
 def analyze_submission(
@@ -251,6 +235,7 @@ def analyze_submission(
     try:
         interaction = active_client.interactions.create(
             model=get_model(model),
+            store=False,
             input=interaction_input,
             response_format={
                 "type": "text",
@@ -314,12 +299,14 @@ Student working:
 
 Return concise tutoring feedback. first_logic_break_step must be 0 if no material logic error is found.
 A correct final answer with unsupported or incorrect reasoning should not automatically receive 100 for reasoning.
+Write mathematical expressions in LaTeX using \\( ... \\) inline or \\[ ... \\] for display maths. Use textbook fractions, roots, indices, and subscripts. Never use dollar-sign delimiters.
 """.strip()
 
     active_client = client or _make_client(api_key)
     try:
         interaction = active_client.interactions.create(
             model=get_model(model),
+            store=False,
             input=prompt,
             response_format={
                 "type": "text",
@@ -386,21 +373,22 @@ ADAPTIVE RULES
 - Use new values and, where suitable for this category, a different representation or surface form.
 - Keep it appropriate to the selected Singapore O-Level / N-Level track.
 - Independently verify the mathematics.
-- Write mathematical expressions in plain text.
-- Do NOT wrap equations or expressions in LaTeX dollar signs such as $...$.
 - Include exactly three progressive hints.
 - Include a verified answer and concise worked solution.
 - Do not reveal the answer inside the question text or the first hint.
 - For Near transfer, keep the mathematical structure close to the diagnosed skill.
 - For Varied context, preserve the skill but change context/representation meaningfully.
 - For Stretch, add one reasonable extra reasoning demand without introducing an unrelated topic.
-    
+- Render mathematical expressions in LaTeX using \\( ... \\) inline or \\[ ... \\] for display maths.
+- Use textbook notation such as \\frac{{a}}{{b}}, \\sqrt{{x}}, x^2, and x_1.
+- Never use dollar-sign math delimiters such as $...$ or $$...$$.
 """.strip()
 
     active_client = client or _make_client(api_key)
     try:
         interaction = active_client.interactions.create(
             model=get_model(model),
+            store=False,
             input=prompt,
             response_format={
                 "type": "text",
@@ -409,16 +397,6 @@ ADAPTIVE RULES
             },
         )
         result = TargetedPracticeQuestion.model_validate_json(interaction.output_text)
-        result.question = clean_latex_delimiters(result.question)
-result.target_skill = clean_latex_delimiters(result.target_skill)
-result.why_this_tests_understanding = clean_latex_delimiters(
-    result.why_this_tests_understanding
-)
-result.hints = [clean_latex_delimiters(hint) for hint in result.hints]
-result.answer = clean_latex_delimiters(result.answer)
-result.worked_solution = [
-    clean_latex_delimiters(step) for step in result.worked_solution
-]
     except ValidationError as exc:
         raise GeminiTutorError(
             "Gemini returned the follow-up practice question in an unexpected format. Please try again.",

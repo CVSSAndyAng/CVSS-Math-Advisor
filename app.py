@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from collections import Counter
 from datetime import datetime, timezone
@@ -56,16 +57,87 @@ st.markdown(
 MAX_FILE_BYTES = 12 * 1024 * 1024
 MAX_TOTAL_BYTES = 30 * 1024 * 1024
 
-def clean_math_text(text: str) -> str:
+
+def math_markdown(text: str) -> str:
+    """Convert model-safe LaTeX delimiters into Streamlit Markdown math delimiters.
+
+    Gemini is prompted to return \\( ... \\) / \\[ ... \\] so raw dollar signs
+    never appear in stored model output. Streamlit Markdown renders the converted
+    delimiters with KaTeX in the browser.
+    """
     if not text:
-        return text
+        return ""
+    return (
+        str(text)
+        .replace(r"\[", "$$")
+        .replace(r"\]", "$$")
+        .replace(r"\(", "$")
+        .replace(r"\)", "$")
+    )
 
-    # Remove paired LaTeX math delimiters used around equations.
-    if text.count("$") == 2:
-        text = text.replace("$", "")
 
-    return text
-    
+def render_math_text(text: str) -> None:
+    st.markdown(math_markdown(text))
+
+
+def _strip_outer_math_delimiters(line: str) -> str:
+    value = line.strip()
+    pairs = [
+        (r"\[", r"\]"),
+        (r"\(", r"\)"),
+        ("$$", "$$"),
+        ("$", "$"),
+    ]
+    for left, right in pairs:
+        if value.startswith(left) and value.endswith(right) and len(value) >= len(left) + len(right):
+            return value[len(left):-len(right)].strip()
+    return value
+
+
+def latex_preview_source(text: str) -> str:
+    """Prepare one or more student-entered LaTeX lines for st.latex preview."""
+    lines = [_strip_outer_math_delimiters(line) for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if len(lines) == 1:
+        return lines[0]
+    return r"\begin{aligned}" + r" \\ ".join(lines) + r"\end{aligned}"
+
+
+def working_input(
+    label: str,
+    *,
+    text_key: str,
+    format_key: str,
+    height: int = 170,
+    plain_placeholder: str = "Show the important reasoning steps, not only the final answer.",
+) -> tuple[str, str]:
+    mode = st.radio(
+        "Working input format",
+        ["Plain text", "LaTeX"],
+        horizontal=True,
+        key=format_key,
+        help="Choose LaTeX to type textbook notation such as \\frac{a}{b}, \\sqrt{x}, x^2, and x_1.",
+    )
+    if mode == "LaTeX":
+        placeholder = (
+            "Example:\n"
+            r"m = \frac{y_2-y_1}{x_2-x_1}" "\n"
+            r"m = \frac{4-1}{-2-7} = -\frac{1}{3}"
+        )
+    else:
+        placeholder = plain_placeholder
+
+    value = st.text_area(label, key=text_key, height=height, placeholder=placeholder)
+    if mode == "LaTeX" and value.strip():
+        st.caption("Formatted mathematics preview")
+        try:
+            st.latex(latex_preview_source(value))
+        except Exception:
+            st.info("Preview could not render this LaTeX yet. You can still submit it to Gemini for analysis.")
+    return value, mode
+
+
 def init_state() -> None:
     defaults: dict[str, Any] = {
         "session_id": secrets.token_hex(8),
@@ -235,17 +307,17 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
     c2.metric("Confidence", a.confidence.title())
     c3.metric("Human review", "Recommended" if a.needs_human_review else "Not flagged")
 
-    st.markdown(f"**Interpreted question:** {a.interpreted_question}")
+    render_math_text(f"**Interpreted question:** {a.interpreted_question}")
     st.markdown(f"**Likely syllabus topic:** {a.likely_syllabus_topic}")
-    st.markdown(f"**Method evidenced by the working:** {a.student_method}")
+    render_math_text(f"**Method evidenced by the working:** {a.student_method}")
 
     if a.first_logic_break_step > 0:
-        st.warning(
-            f"First material logic break: step {a.first_logic_break_step}. "
-            f"{a.first_logic_break_explanation}"
-        )
+        st.warning(f"First material logic break: step {a.first_logic_break_step}.")
+        render_math_text(a.first_logic_break_explanation)
     else:
-        st.success(a.first_logic_break_explanation or "No material logic break was identified.")
+        st.success("No material logic break was identified.")
+        if a.first_logic_break_explanation:
+            render_math_text(a.first_logic_break_explanation)
 
     if a.steps:
         st.markdown("### Step-by-step reasoning")
@@ -257,30 +329,30 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
             "unsupported": "⚪",
         }
         for step in a.steps:
-            title = f"{icons.get(step.status, '•')} Step {step.line_number}: {step.student_step}"
-            with st.expander(title):
-                st.write(f"**What the step appears to be doing:** {step.logic_inferred}")
+            with st.expander(f"{icons.get(step.status, '•')} Step {step.line_number}"):
+                render_math_text(f"**Student step:** {step.student_step}")
+                render_math_text(f"**What the step appears to be doing:** {step.logic_inferred}")
                 st.write(f"**Issue type:** {step.issue_type}")
-                st.write(step.feedback)
+                render_math_text(step.feedback)
 
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("### Strengths")
         for item in a.strengths:
-            st.write(f"• {item}")
+            render_math_text(f"• {item}")
     with c2:
         st.markdown("### Main gap to repair")
-        st.write(a.misconception_or_gap)
-        st.markdown(f"**Diagnostic question:** {a.diagnostic_question}")
+        render_math_text(a.misconception_or_gap)
+        render_math_text(f"**Diagnostic question:** {a.diagnostic_question}")
 
     st.markdown("### Guided correction")
     for i, hint in enumerate(a.hint_ladder, 1):
         with st.expander(f"Hint {i}"):
-            st.write(hint)
+            render_math_text(hint)
     with st.expander("Reveal corrected path and answer"):
         for i, line in enumerate(a.corrected_path, 1):
-            st.write(f"{i}. {line}")
-        st.markdown(f"**Final answer:** {a.final_answer}")
+            render_math_text(f"{i}. {line}")
+        render_math_text(f"**Final answer:** {a.final_answer}")
 
 
 def render_practice_evaluation(e: PracticeEvaluation) -> None:
@@ -288,18 +360,20 @@ def render_practice_evaluation(e: PracticeEvaluation) -> None:
     c1.metric("Answer", f"{e.answer_score}%")
     c2.metric("Reasoning", f"{e.reasoning_score}%")
     c3.metric("Mastery", e.mastery)
-    st.info(e.summary)
+    render_math_text(e.summary)
     if e.first_logic_break_step > 0:
-        st.warning(
-            f"First logic break: step {e.first_logic_break_step}. "
-            f"{e.first_logic_break_explanation}"
-        )
+        st.warning(f"First logic break: step {e.first_logic_break_step}.")
+        render_math_text(e.first_logic_break_explanation)
     if e.strengths:
-        st.markdown("**Strengths:** " + "; ".join(e.strengths))
+        st.markdown("**Strengths**")
+        for item in e.strengths:
+            render_math_text(f"• {item}")
     if e.gaps:
-        st.markdown("**Gaps:** " + "; ".join(e.gaps))
-    st.markdown(f"**Next hint:** {e.next_hint}")
-    st.markdown(f"**Corrected next step:** {e.corrected_next_step}")
+        st.markdown("**Gaps**")
+        for item in e.gaps:
+            render_math_text(f"• {item}")
+    render_math_text(f"**Next hint:** {e.next_hint}")
+    render_math_text(f"**Corrected next step:** {e.corrected_next_step}")
     st.caption(f"Gemini confidence: {e.confidence}")
 
 
@@ -422,11 +496,12 @@ with ai_tab:
         accept_multiple_files=True,
         key="ai_question_files",
     )
-    w_text = st.text_area(
+    w_text, w_input_mode = working_input(
         "Student working",
-        key="ai_working_text",
+        text_key="ai_working_text",
+        format_key="ai_working_format",
         height=190,
-        placeholder="Type the student's steps here, or leave blank if the working is in the uploaded file.",
+        plain_placeholder="Type the student's steps here, or leave blank if the working is in the uploaded file.",
     )
     w_files = st.file_uploader(
         "Student working image/PDF (optional)",
@@ -448,7 +523,13 @@ with ai_tab:
         if not consent:
             st.error("Confirm the Gemini data-sharing acknowledgement before sending the submission.")
         else:
-            evidence, offline_result = offline_evidence_for(q_text, w_text)
+            if w_input_mode == "Plain text":
+                evidence, offline_result = offline_evidence_for(q_text, w_text)
+            else:
+                evidence, offline_result = "", None
+            working_for_gemini = (
+                f"[Student working input format: {w_input_mode}]\n{w_text}" if w_text.strip() else w_text
+            )
             try:
                 assets_q = uploaded_assets(q_files)
                 assets_w = uploaded_assets(w_files)
@@ -456,7 +537,7 @@ with ai_tab:
                     analysis = analyze_submission(
                         track_label=track_label,
                         question_text=q_text,
-                        working_text=w_text,
+                        working_text=working_for_gemini,
                         question_assets=assets_q,
                         working_assets=assets_w,
                         offline_evidence=evidence,
@@ -530,19 +611,20 @@ with ai_tab:
                     f"This category remains active because the student has had {misses} non-secure attempt(s). "
                     f"Current recovery streak: {streak}/2 secure attempts."
                 )
-            st.markdown(f'<div class="soft-card"><strong>{pq.question}</strong></div>', unsafe_allow_html=True)
-            st.caption(f"Target skill: {pq.target_skill}")
-            st.write(pq.why_this_tests_understanding)
+            with st.container(border=True):
+                render_math_text(f"**{pq.question}**")
+            render_math_text(f"**Target skill:** {pq.target_skill}")
+            render_math_text(pq.why_this_tests_understanding)
             with st.expander("Practice hints"):
                 for i, hint in enumerate(pq.hints, 1):
-                    st.write(f"**Hint {i}:** {hint}")
+                    render_math_text(f"**Hint {i}:** {hint}")
 
             working_key = f"ai_practice_working_{stage_index}_{st.session_state.ai_practice_question_version}"
-            attempt = st.text_area(
+            attempt, practice_input_mode = working_input(
                 f"Student working for {kind}",
-                key=working_key,
+                text_key=working_key,
+                format_key=f"{working_key}_format",
                 height=150,
-                placeholder="Show the important reasoning steps, not only the final answer.",
             )
 
             if st.button(f"Check {kind} reasoning", key=f"ai_practice_check_{stage_index}_{st.session_state.ai_practice_question_version}", type="primary"):
@@ -551,7 +633,10 @@ with ai_tab:
                         evaluation = evaluate_practice_attempt(
                             track_label=track_label,
                             practice_question=pq,
-                            student_working=attempt,
+                            student_working=(
+                                f"[Student working input format: {practice_input_mode}]\n{attempt}"
+                                if attempt.strip() else attempt
+                            ),
                             original_gap=analysis.misconception_or_gap,
                             api_key=explicit_key,
                             model=model,
