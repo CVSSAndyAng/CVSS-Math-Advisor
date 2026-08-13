@@ -1326,6 +1326,37 @@ try:
 except Exception:
     _visual_2d_component = None
 
+# Compact 2D schematic used inside targeted practice. It reuses the safe declarative
+# JSXGraph renderer but is intentionally smaller than the full visual-explanation board.
+_PRACTICE_DIAGRAM_HTML = """
+<div class="omt-visual2d-shell omt-practice-diagram-shell">
+  <div class="omt-visual2d-board"></div>
+</div>
+"""
+
+_PRACTICE_DIAGRAM_CSS = """
+.omt-practice-diagram-shell { width:100%; }
+.omt-practice-diagram-shell .omt-visual2d-board {
+  width:100%; height:320px; min-height:280px;
+  border:1px solid rgba(128,128,128,.28); border-radius:.75rem;
+  overflow:hidden; background:#fff; touch-action:none;
+}
+@media (max-width:640px) {
+  .omt-practice-diagram-shell .omt-visual2d-board { height:300px; min-height:260px; }
+}
+"""
+
+try:
+    _practice_diagram_component = st.components.v2.component(
+        "omt_targeted_practice_diagram",
+        html=_PRACTICE_DIAGRAM_HTML,
+        css=_PRACTICE_DIAGRAM_CSS,
+        js=_VISUAL_2D_JS,
+        isolate_styles=False,
+    )
+except Exception:
+    _practice_diagram_component = None
+
 try:
     _visual_3d_component = st.components.v2.component(
         "omt_visual_explanation_3d",
@@ -1534,6 +1565,70 @@ def render_visual_explanation(plan: VisualExplanationResult, question_files: lis
 
     if plan.mode == "geometry3d":
         st.caption("iPad: drag with one finger to rotate the solid and pinch with two fingers to zoom. Use Replay to watch the current construction/camera movement again.")
+
+
+def _clean_practice_display_text(text: str) -> str:
+    """Keep generated practice wording compact and prevent model Markdown from taking over the UI."""
+    value = str(text or "").strip()
+    value = value.replace("**", "")
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def _render_practice_key_information(items: list[str]) -> None:
+    for item in (items or [])[:6]:
+        if not str(item).strip():
+            continue
+        cols = st.columns([0.035, 0.965])
+        cols[0].markdown("•")
+        with cols[1]:
+            render_mathio_mixed(_clean_practice_display_text(str(item)))
+
+
+def render_targeted_practice_focus(pq: TargetedPracticeQuestion, *, key: str) -> None:
+    """Show a concise task first and a schematic when the generated question is visual."""
+    focus_prompt = _clean_practice_display_text(getattr(pq, "focus_prompt", "") or "")
+    full_question = _clean_practice_display_text(getattr(pq, "question", "") or "")
+    key_information = list(getattr(pq, "key_information", []) or [])
+    diagram = getattr(pq, "diagram_2d", None)
+    diagram_note = str(getattr(pq, "diagram_note", "") or "").strip()
+
+    with st.container(border=True):
+        st.markdown("#### What you need to do")
+        render_mathio_mixed(focus_prompt or full_question)
+
+        if diagram is not None:
+            left, right = st.columns([1.35, 1], vertical_alignment="top")
+            with left:
+                if _practice_diagram_component is not None:
+                    _practice_diagram_component(
+                        data={
+                            "scene": diagram.model_dump(),
+                            "step": {"highlight_ids": [], "dim_ids": [], "animate_ids": []},
+                            "visible_ids": [],
+                            "animate_ids": [],
+                            "reveal_mode": False,
+                            "animation_nonce": 0,
+                        },
+                        default={},
+                        key=f"practice_diagram_{key}",
+                        width="stretch",
+                        height="content",
+                    )
+                else:
+                    st.info("The practice diagram could not load in this browser session.")
+                st.caption(diagram_note or "Schematic only — not drawn to scale.")
+            with right:
+                if key_information:
+                    st.markdown("**Key information**")
+                    _render_practice_key_information(key_information)
+        elif key_information:
+            st.markdown("**Key information**")
+            _render_practice_key_information(key_information)
+
+        with st.expander("Show full question"):
+            render_mathio_mixed(full_question)
 
 
 def init_state() -> None:
@@ -2442,13 +2537,17 @@ with ai_tab:
                     f"This category remains active because the student has had {misses} non-secure attempt(s). "
                     f"Current recovery streak: {streak}/2 secure attempts."
                 )
-            with st.container(border=True):
-                render_math_text(f"**{pq.question}**")
-            render_math_text(f"**Target skill:** {pq.target_skill}")
+            render_targeted_practice_focus(
+                pq,
+                key=f"{stage_index}_{st.session_state.ai_practice_question_version}",
+            )
+            st.caption("Focus skill")
+            render_mathio_mixed(_clean_practice_display_text(pq.target_skill))
             required_parts = required_parts_for_question(pq)
             if required_parts != ["whole question"]:
                 st.caption("All parts required for mastery: " + ", ".join(required_parts))
-            render_math_text(pq.why_this_tests_understanding)
+            with st.expander("Why this question"):
+                render_mathio_mixed(_clean_practice_display_text(pq.why_this_tests_understanding))
             with st.expander("Practice hints"):
                 for i, hint in enumerate(pq.hints, 1):
                     st.markdown(f"**Hint {i}:**")
