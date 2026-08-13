@@ -927,7 +927,10 @@ RECONSTRUCTION SAFETY
 - If the question provides front/top/side or other orthographic views, treat them as views of ONE object. Match shared dimensions and component positions across views before building the 3D scene.
 - Preserve every stated dimension and ratio. NEVER invent a numerical dimension just to make the model look attractive. If some dimensions are not given, use a schematic normalized dimension only for visual placement and explicitly say which proportions are schematic in reconstruction_note.
 - Use scene_3d.boxes for cuboids, cylinders for cylindrical parts, cones for cones, spheres for spherical parts, and extrusions for triangular/trapezoidal/other constant-cross-section prisms. Use vertices/edges/faces mainly for named points, mathematical construction lines, sections, diagonals and angle overlays.
-- A composite-solid/volume question in geometry3d should normally contain at least one solid primitive (box/cylinder/cone/sphere/extrusion), not only isolated vertices and line segments.
+- A composite-solid/volume question in geometry3d MUST contain solid primitives (box/cylinder/cone/sphere/extrusion), not only isolated vertices and line segments. If you cannot reconstruct the physical solids reliably, return mode="none".
+- Build all component solids in ONE compact shared coordinate frame. The assembled object should normally fit within roughly -10 to 10 on each axis after any schematic normalisation. Do not scatter named vertices far away from the solid.
+- Named vertices used for diagonals/angles should lie on or very near the reconstructed solid surfaces. Do not create decorative vertex clouds or labels that are not needed by a corrected solution step.
+- Preserve relative placement: components that touch in the source/question must touch in the model; stacked components must actually be stacked; concentric/coaxial components must share the intended axis.
 - For 3D solids, choose an internally consistent coordinate model that preserves named vertices/edges/faces, stated component relationships, and stated lengths/angles. Do not imply unstated lengths are exact.
 
 VISUAL DATA RULES
@@ -963,7 +966,7 @@ STEP-BY-STEP PEDAGOGY — STRICT ALIGNMENT
 - Explanations must be concise and student-friendly. Put any mathematical expressions in \( ... \) transport delimiters for MathIO rendering.
 
 3D-SPECIFIC TEACHING
-- The first visual state must look recognisably like the physical solid in the question. A cloud of labelled points is not acceptable for a composite 3D solid.
+- The first visual state must look recognisably like the physical solid in the question. A cloud of labelled points is not acceptable for a composite 3D solid. If the solid cannot be recognised from the solid primitives alone, return mode="none" rather than a misleading 3D view.
 - For composite volume/surface-area questions, show the assembled solid, then visually isolate/highlight the exact component being calculated at each corrected step (base prism, cylinder, top block, etc.), then reunite/highlight the final total.
 - For a 3D angle/length question, explicitly reveal the 2D triangle or cross-section inside the solid before applying trigonometry or Pythagoras.
 - Use reveal_ids so that auxiliary diagonal/cross-section edges appear only when the matching corrected step needs them, and animate_ids so those edges visibly grow into place. Physical solid components may remain visible throughout and be dimmed when not in focus.

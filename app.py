@@ -906,17 +906,35 @@ export default async function(component) {
 
 _VISUAL_3D_HTML = """
 <div class="omt-visual3d-shell">
+  <div class="omt-visual3d-toolbar" role="toolbar" aria-label="3D view controls">
+    <button type="button" data-action="rotate" class="is-active">Rotate</button>
+    <button type="button" data-action="pan">Pan</button>
+    <span class="omt-visual3d-divider"></span>
+    <button type="button" data-action="home">Fit</button>
+    <button type="button" data-action="iso">Iso</button>
+    <button type="button" data-action="front">Front</button>
+    <button type="button" data-action="top">Top</button>
+    <button type="button" data-action="side">Side</button>
+  </div>
   <div class="omt-visual3d-stage"></div>
-  <div class="omt-visual-help">Drag with one finger to rotate. Pinch with two fingers to zoom. The solid is reconstructed from the question. Highlighted components, edges and angles are the ones used in this step.</div>
+  <div class="omt-visual-help">Rotate mode: drag with one finger/mouse. Pan mode: drag with one finger/mouse to move the model. Two fingers pan + zoom on iPad. Use Fit if the object moves out of view.</div>
 </div>
 """
 
 _VISUAL_3D_CSS = """
 .omt-visual3d-shell { width: 100%; }
-.omt-visual3d-stage { width: 100%; height: min(64vw, 540px); min-height: 390px; border: 1px solid rgba(128,128,128,.28); border-radius: .75rem; overflow: hidden; background: linear-gradient(#f8fafc,#ffffff); touch-action: none; position: relative; }
+.omt-visual3d-toolbar { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; margin:0 0 .45rem 0; }
+.omt-visual3d-toolbar button { appearance:none; border:1px solid rgba(100,116,139,.35); background:#fff; color:#334155; border-radius:.55rem; padding:.46rem .72rem; font:600 .78rem/1 system-ui,sans-serif; cursor:pointer; min-height:36px; }
+.omt-visual3d-toolbar button:hover { background:#f1f5f9; }
+.omt-visual3d-toolbar button.is-active { background:#e0f2fe; border-color:#38bdf8; color:#075985; }
+.omt-visual3d-divider { width:1px; height:26px; background:rgba(100,116,139,.25); margin:0 .1rem; }
+.omt-visual3d-stage { width: 100%; height: min(66vw, 590px); min-height: 430px; border: 1px solid rgba(100,116,139,.32); border-radius: .75rem; overflow: hidden; background:#f8fafc; touch-action: none; position: relative; }
 .omt-visual3d-stage canvas { display:block; width:100%; height:100%; }
-.omt-visual-help { margin-top:.35rem; font-size:.78rem; opacity:.68; }
-@media (max-width: 640px) { .omt-visual3d-stage { height: 450px; min-height: 390px; } }
+.omt-visual-help { margin-top:.38rem; font-size:.78rem; color:#64748b; }
+@media (max-width: 640px) {
+  .omt-visual3d-stage { height: 520px; min-height: 430px; }
+  .omt-visual3d-toolbar button { min-height:42px; padding:.55rem .78rem; font-size:.82rem; }
+}
 """
 
 _VISUAL_3D_JS = r"""
@@ -961,7 +979,7 @@ function solidMaterial(THREE,id,highlight,dim){
     color: hi?0xf97316:hashColor(id),
     roughness:.72, metalness:.02,
     transparent: low,
-    opacity: low?.16:1,
+    opacity: low?.42:1,
     side: THREE.DoubleSide,
     depthWrite: !low,
   });
@@ -974,7 +992,7 @@ function orientAxis(mesh,axis){
 
 function addSolidEdges(THREE,mesh,id,highlight,dim,scene){
   const geom=new THREE.EdgesGeometry(mesh.geometry,20);
-  const mat=new THREE.LineBasicMaterial({color:highlight.has(id)?0xc2410c:(dim.has(id)?0x94a3b8:0x334155),transparent:true,opacity:dim.has(id)?.22:.92});
+  const mat=new THREE.LineBasicMaterial({color:highlight.has(id)?0xc2410c:(dim.has(id)?0x94a3b8:0x334155),transparent:true,opacity:dim.has(id)?.42:.96});
   const lines=new THREE.LineSegments(geom,mat); lines.position.copy(mesh.position); lines.rotation.copy(mesh.rotation); lines.scale.copy(mesh.scale); scene.add(lines);
   return lines;
 }
@@ -988,14 +1006,18 @@ function addSolidLabel(THREE,mesh,label,id,highlight,scene){
 export default async function(component) {
   const {parentElement,data}=component;
   const stage=parentElement.querySelector('.omt-visual3d-stage');
+  const toolbar=parentElement.querySelector('.omt-visual3d-toolbar');
   const sceneData=data?.scene||{}, step=data?.step||{};
   const highlight=new Set(step.highlight_ids||[]), dim=new Set(step.dim_ids||[]);
   const explicitAnimate=new Set(data?.animate_ids||step.animate_ids||[]);
   const animate=new Set([...(step.highlight_ids||[]), ...explicitAnimate]);
   const newlyRevealed=new Set(step.reveal_ids||[]);
   const revealMode=Boolean(data?.reveal_mode), visible=new Set(data?.visible_ids||[]);
-  const isVisible=(id)=>!revealMode||visible.has(id)||highlight.has(id)||animate.has(id);
   const solidGroups=[sceneData.boxes||[],sceneData.cylinders||[],sceneData.cones||[],sceneData.spheres||[],sceneData.extrusions||[]];
+  const solidIds=new Set(solidGroups.flat().map(x=>x.id));
+  // Physical solids remain visible throughout. revealMode is for construction geometry,
+  // not for hiding the object the student is trying to understand.
+  const isVisible=(id)=>solidIds.has(id)||!revealMode||visible.has(id)||highlight.has(id)||animate.has(id);
   if(animate.size===0 && Number(data?.animation_nonce||0)>0){
     for(const group of [sceneData.vertices||[],sceneData.edges||[],sceneData.faces||[],sceneData.angles||[],...solidGroups]){
       for(const item of group) if(isVisible(item.id)) animate.add(item.id);
@@ -1010,15 +1032,19 @@ export default async function(component) {
   const scene=new THREE.Scene();
   const camera=new THREE.PerspectiveCamera(38,1,.01,2000);
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2)); renderer.setClearColor(0xffffff,0);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2)); renderer.setClearColor(0xf8fafc,1);
   renderer.outputColorSpace=THREE.SRGBColorSpace; stage.appendChild(renderer.domElement);
-  const controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.dampingFactor=.08; controls.enablePan=true;
-  scene.add(new THREE.HemisphereLight(0xffffff,0xb8c2cf,2.1));
+  const controls=new OrbitControls(camera,renderer.domElement);
+  controls.enableDamping=true; controls.dampingFactor=.075; controls.enablePan=true; controls.enableRotate=true;
+  controls.screenSpacePanning=true; controls.rotateSpeed=.62; controls.panSpeed=.72; controls.zoomSpeed=.82;
+  controls.mouseButtons={LEFT:THREE.MOUSE.ROTATE,MIDDLE:THREE.MOUSE.DOLLY,RIGHT:THREE.MOUSE.PAN};
+  controls.touches={ONE:THREE.TOUCH.ROTATE,TWO:THREE.TOUCH.DOLLY_PAN};
+  scene.add(new THREE.HemisphereLight(0xffffff,0x94a3b8,2.6));
   const keyLight=new THREE.DirectionalLight(0xffffff,2.2); keyLight.position.set(7,10,8); scene.add(keyLight);
   const fillLight=new THREE.DirectionalLight(0xffffff,1.0); fillLight.position.set(-7,4,-6); scene.add(fillLight);
 
-  const vertices=new Map(), coords=[];
-  for(const v of (sceneData.vertices||[])){const pos=new THREE.Vector3(Number(v.x),Number(v.y),Number(v.z));coords.push(pos);vertices.set(v.id,pos);}
+  const vertices=new Map(), vertexCoords=[], solidCoords=[];
+  for(const v of (sceneData.vertices||[])){const pos=new THREE.Vector3(Number(v.x),Number(v.y),Number(v.z));vertexCoords.push(pos);vertices.set(v.id,pos);}
   const neededVertices=new Set();
   for(const e of (sceneData.edges||[])) if(isVisible(e.id)){neededVertices.add(e.start);neededVertices.add(e.end);}
   for(const f of (sceneData.faces||[])) if(isVisible(f.id)) for(const id of (f.vertices||[])) neededVertices.add(id);
@@ -1030,7 +1056,7 @@ export default async function(component) {
     if(doAnimate){const startScale=newlyRevealed.has(id)?.08:.86;mesh.scale.multiplyScalar(startScale); solidTweens.push({mesh,baseScale,startScale,start:performance.now()+60,duration:720});}
     scene.add(mesh); const edge=addSolidEdges(THREE,mesh,id,highlight,dim,scene); mesh.userData.__edge=edge;
     addSolidLabel(THREE,mesh,label,id,highlight,scene);
-    const box=new THREE.Box3().setFromObject(mesh); if(Number.isFinite(box.min.x)){coords.push(box.min.clone(),box.max.clone());}
+    const box=new THREE.Box3().setFromObject(mesh); if(Number.isFinite(box.min.x)){solidCoords.push(box.min.clone(),box.max.clone());}
   };
 
   for(const b of (sceneData.boxes||[])){
@@ -1068,12 +1094,19 @@ export default async function(component) {
     const mesh=new THREE.Mesh(geom,solidMaterial(THREE,ex.id,highlight,dim)); mesh.position.set(...(ex.center||[0,0,0])); registerSolid(mesh,ex.id,ex.label||'');
   }
 
+  const focusVertices=new Set();
+  for(const e of (sceneData.edges||[])) if(highlight.has(e.id)){focusVertices.add(e.start);focusVertices.add(e.end);}
+  for(const a of (sceneData.angles||[])) if(highlight.has(a.id)){focusVertices.add(a.arm1);focusVertices.add(a.vertex);focusVertices.add(a.arm2);}
   for(const v of (sceneData.vertices||[])){
     if(!isVisible(v.id)&&!neededVertices.has(v.id)) continue;
     const pos=vertices.get(v.id), hi=highlight.has(v.id), low=dim.has(v.id);
-    const geom=new THREE.SphereGeometry(hi?.085:.055,18,12); const mat=new THREE.MeshBasicMaterial({color:hi?0xdc2626:(low?0xcbd5e1:0x0f172a),transparent:true,opacity:low?.3:1});
+    const geom=new THREE.SphereGeometry(hi?.075:.038,16,10); const mat=new THREE.MeshBasicMaterial({color:hi?0xdc2626:(low?0xcbd5e1:0x334155),transparent:true,opacity:low?.22:(hi?1:.48)});
     const mesh=new THREE.Mesh(geom,mat);mesh.position.copy(pos);scene.add(mesh);
-    const label=textSprite(THREE,v.label||v.id,hi?'#dc2626':'#0f172a',.68);if(label){label.position.copy(pos).add(new THREE.Vector3(.12,.16,.08));scene.add(label);}
+    // Avoid the unreadable cloud of labels seen in complex composite solids.
+    // Labels appear only when the current teaching step actually uses the vertex.
+    if(hi||focusVertices.has(v.id)){
+      const label=textSprite(THREE,v.label||v.id,hi?'#dc2626':'#334155',.64);if(label){label.position.copy(pos).add(new THREE.Vector3(.11,.15,.07));scene.add(label);}
+    }
   }
 
   const edgeTweens=[];
@@ -1105,24 +1138,70 @@ export default async function(component) {
     if(aDef.label){const mid=samples[Math.floor(samples.length/2)],sp=textSprite(THREE,aDef.label,highlight.has(aDef.id)?'#dc2626':'#334155',.66);if(sp){sp.position.copy(mid);scene.add(sp);}}
   }
 
-  let center=new THREE.Vector3(0,0,0),radius=2;if(coords.length){const box=new THREE.Box3().setFromPoints(coords);center=box.getCenter(new THREE.Vector3());radius=Math.max(box.getSize(new THREE.Vector3()).length()*.72,1.6);}
-  const grid=new THREE.GridHelper(radius*2.3,12,0xcbd5e1,0xe2e8f0); grid.position.y=Math.min(...coords.map(p=>p.y),0)-.08; grid.material.transparent=true; grid.material.opacity=.32; scene.add(grid);
+  // Frame the PHYSICAL SOLID first. Scattered named vertices must never make the
+  // camera zoom so far out that the object disappears.
+  const fitCoords=solidCoords.length?solidCoords:vertexCoords;
+  let center=new THREE.Vector3(0,0,0),radius=2,fitBox=null;
+  if(fitCoords.length){fitBox=new THREE.Box3().setFromPoints(fitCoords);center=fitBox.getCenter(new THREE.Vector3());const sphere=fitBox.getBoundingSphere(new THREE.Sphere());radius=Math.max(sphere.radius,1.0);}
+  const fovRad=THREE.MathUtils.degToRad(camera.fov); const fitDistance=Math.max(radius/Math.sin(fovRad/2)*1.18,radius*2.25);
+  camera.near=Math.max(.005,radius/1000); camera.far=Math.max(150,radius*80); camera.updateProjectionMatrix();
+  controls.minDistance=Math.max(radius*.45,.25); controls.maxDistance=Math.max(radius*12,12);
+  const groundY=fitBox?fitBox.min.y-.05:center.y-radius*.55;
+  const grid=new THREE.GridHelper(Math.max(radius*3.2,3),10,0xcbd5e1,0xe2e8f0); grid.position.set(center.x,groundY,center.z); grid.material.transparent=true; grid.material.opacity=.16; scene.add(grid);
   const cp=Array.isArray(step.camera_position)&&step.camera_position.length===3?step.camera_position:null,ct=Array.isArray(step.camera_target)&&step.camera_target.length===3?step.camera_target:null;
-  const targetPos=new THREE.Vector3(...(cp?cp:[center.x+radius*1.3,center.y+radius*.85,center.z+radius*1.3]));
-  const targetLook=new THREE.Vector3(...(ct?ct:[center.x,center.y,center.z]));
+  let targetLook=new THREE.Vector3(...(ct?ct:[center.x,center.y,center.z]));
+  // Reject model-supplied camera targets/positions that are wildly outside the reconstructed solid.
+  if(targetLook.distanceTo(center)>radius*3.5) targetLook=center.clone();
+  let targetPos=cp?new THREE.Vector3(...cp):new THREE.Vector3(center.x+fitDistance*.72,center.y+fitDistance*.48,center.z+fitDistance*.72);
+  const suppliedDistance=targetPos.distanceTo(targetLook);
+  if(!Number.isFinite(suppliedDistance)||suppliedDistance<radius*.7||suppliedDistance>radius*7){targetPos.set(center.x+fitDistance*.72,center.y+fitDistance*.48,center.z+fitDistance*.72);}
   const pcp=Array.isArray(data?.previous_camera_position)&&data.previous_camera_position.length===3?new THREE.Vector3(...data.previous_camera_position):targetPos.clone();
   const pct=Array.isArray(data?.previous_camera_target)&&data.previous_camera_target.length===3?new THREE.Vector3(...data.previous_camera_target):targetLook.clone();
   camera.position.copy(pcp);controls.target.copy(pct);camera.lookAt(controls.target);controls.update();
   const camStart=performance.now(),camDuration=850;
+  let cameraTweenActive=true;
+  controls.addEventListener('start',()=>{cameraTweenActive=false;});
+
+  const setInteractionMode=(mode)=>{
+    const rotate=mode!=='pan';
+    controls.mouseButtons.LEFT=rotate?THREE.MOUSE.ROTATE:THREE.MOUSE.PAN;
+    controls.touches.ONE=rotate?THREE.TOUCH.ROTATE:THREE.TOUCH.PAN;
+    for(const btn of toolbar?.querySelectorAll('button[data-action="rotate"],button[data-action="pan"]')||[]){
+      btn.classList.toggle('is-active',btn.dataset.action===mode);
+    }
+  };
+  const moveCamera=(position,look=center)=>{
+    cameraTweenActive=false;
+    camera.position.copy(position); controls.target.copy(look); camera.lookAt(look); controls.update();
+  };
+  const standardView=(name)=>{
+    const d=fitDistance;
+    if(name==='front') moveCamera(new THREE.Vector3(center.x,center.y,center.z+d),center);
+    else if(name==='top') moveCamera(new THREE.Vector3(center.x,center.y+d,center.z+.001),center);
+    else if(name==='side') moveCamera(new THREE.Vector3(center.x+d,center.y,center.z),center);
+    else moveCamera(new THREE.Vector3(center.x+d*.72,center.y+d*.48,center.z+d*.72),center);
+  };
+  const toolbarHandler=(event)=>{
+    const btn=event.target.closest('button[data-action]'); if(!btn)return;
+    event.preventDefault();event.stopPropagation();const action=btn.dataset.action;
+    if(action==='rotate'||action==='pan') setInteractionMode(action);
+    else if(action==='home'||action==='iso') standardView('iso');
+    else standardView(action);
+  };
+  toolbar?.addEventListener('click',toolbarHandler);
+  setInteractionMode('rotate');
 
   const resize=()=>{const w=Math.max(stage.clientWidth,320),h=Math.max(stage.clientHeight,390);renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();};resize();const ro=new ResizeObserver(resize);ro.observe(stage);
   let raf=0;const animateFrame=(now)=>{raf=requestAnimationFrame(animateFrame);
-    const ctween=Math.min(1,(now-camStart)/camDuration);const ce=1-Math.pow(1-ctween,3);camera.position.lerpVectors(pcp,targetPos,ce);controls.target.lerpVectors(pct,targetLook,ce);
+    if(cameraTweenActive){
+      const ctween=Math.min(1,(now-camStart)/camDuration);const ce=1-Math.pow(1-ctween,3);camera.position.lerpVectors(pcp,targetPos,ce);controls.target.lerpVectors(pct,targetLook,ce);
+      if(ctween>=1) cameraTweenActive=false;
+    }
     for(const tw of edgeTweens){const t=Math.max(0,Math.min(1,(now-tw.start)/tw.duration)),e=1-Math.pow(1-t,3),cur=tw.a.clone().lerp(tw.b,e);tw.attr.setXYZ(1,cur.x,cur.y,cur.z);tw.attr.needsUpdate=true;if(tw.line.material.isLineDashedMaterial)tw.line.computeLineDistances();}
     for(const tw of solidTweens){const t=Math.max(0,Math.min(1,(now-tw.start)/tw.duration)),e=1-Math.pow(1-t,3),k=tw.startScale+(1-tw.startScale)*e;tw.mesh.scale.copy(tw.baseScale).multiplyScalar(k); if(tw.mesh.userData.__edge) tw.mesh.userData.__edge.scale.copy(tw.mesh.scale);}
     controls.update();renderer.render(scene,camera);
   };raf=requestAnimationFrame(animateFrame);
-  parentElement.__omtThreeCleanup=()=>{cancelAnimationFrame(raf);ro.disconnect();controls.dispose();scene.traverse(o=>{o.geometry?.dispose?.();if(o.material){const mats=Array.isArray(o.material)?o.material:[o.material];for(const m of mats){m.map?.dispose?.();m.dispose?.();}}});renderer.dispose();renderer.domElement.remove();};
+  parentElement.__omtThreeCleanup=()=>{cancelAnimationFrame(raf);ro.disconnect();toolbar?.removeEventListener('click',toolbarHandler);controls.dispose();scene.traverse(o=>{o.geometry?.dispose?.();if(o.material){const mats=Array.isArray(o.material)?o.material:[o.material];for(const m of mats){m.map?.dispose?.();m.dispose?.();}}});renderer.dispose();renderer.domElement.remove();};
 }
 
 """
