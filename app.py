@@ -911,13 +911,14 @@ _VISUAL_3D_HTML = """
     <button type="button" data-action="pan">Pan</button>
     <span class="omt-visual3d-divider"></span>
     <button type="button" data-action="home">Fit</button>
-    <button type="button" data-action="iso">Iso</button>
+    <button type="button" data-action="source">Question view</button>
+    <button type="button" data-action="iso">Explore iso</button>
     <button type="button" data-action="front">Front</button>
     <button type="button" data-action="top">Top</button>
     <button type="button" data-action="side">Side</button>
   </div>
   <div class="omt-visual3d-stage"></div>
-  <div class="omt-visual-help">Rotate mode: drag with one finger/mouse. Pan mode: drag with one finger/mouse to move the model. Two fingers pan + zoom on iPad. Use Fit if the object moves out of view.</div>
+  <div class="omt-visual-help">Question view matches the orientation inferred from the uploaded isometric/orthographic drawing. Rotate mode explores the solid; Pan moves it. Use Question view to return to the exam-diagram orientation.</div>
 </div>
 """
 
@@ -1008,6 +1009,9 @@ export default async function(component) {
   const stage=parentElement.querySelector('.omt-visual3d-stage');
   const toolbar=parentElement.querySelector('.omt-visual3d-toolbar');
   const sceneData=data?.scene||{}, step=data?.step||{};
+  const sourceView=sceneData.source_view||null;
+  const sourceProjection=String(sourceView?.projection||'unknown').toLowerCase();
+  const useOrthographic=['isometric','orthographic','oblique'].includes(sourceProjection);
   const highlight=new Set(step.highlight_ids||[]), dim=new Set(step.dim_ids||[]);
   const explicitAnimate=new Set(data?.animate_ids||step.animate_ids||[]);
   const animate=new Set([...(step.highlight_ids||[]), ...explicitAnimate]);
@@ -1030,7 +1034,15 @@ export default async function(component) {
   try{({THREE,OrbitControls}=await loadThree());}catch(err){stage.textContent='Interactive 3D visual could not load.';return;}
 
   const scene=new THREE.Scene();
-  const camera=new THREE.PerspectiveCamera(38,1,.01,2000);
+  // Printed isometric/orthographic exam diagrams use parallel projection. Using a
+  // perspective camera changes edge directions and makes a correct solid look unlike
+  // the source. Source-calibrated views therefore use OrthographicCamera by default.
+  const camera=useOrthographic
+    ? new THREE.OrthographicCamera(-5,5,5,-5,.01,2000)
+    : new THREE.PerspectiveCamera(38,1,.01,2000);
+  if(Array.isArray(sourceView?.camera_up)&&sourceView.camera_up.length===3){
+    camera.up.set(Number(sourceView.camera_up[0]),Number(sourceView.camera_up[1]),Number(sourceView.camera_up[2])).normalize();
+  }
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
   renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2)); renderer.setClearColor(0xf8fafc,1);
   renderer.outputColorSpace=THREE.SRGBColorSpace; stage.appendChild(renderer.domElement);
@@ -1143,12 +1155,21 @@ export default async function(component) {
   const fitCoords=solidCoords.length?solidCoords:vertexCoords;
   let center=new THREE.Vector3(0,0,0),radius=2,fitBox=null;
   if(fitCoords.length){fitBox=new THREE.Box3().setFromPoints(fitCoords);center=fitBox.getCenter(new THREE.Vector3());const sphere=fitBox.getBoundingSphere(new THREE.Sphere());radius=Math.max(sphere.radius,1.0);}
-  const fovRad=THREE.MathUtils.degToRad(camera.fov); const fitDistance=Math.max(radius/Math.sin(fovRad/2)*1.18,radius*2.25);
-  camera.near=Math.max(.005,radius/1000); camera.far=Math.max(150,radius*80); camera.updateProjectionMatrix();
-  controls.minDistance=Math.max(radius*.45,.25); controls.maxDistance=Math.max(radius*12,12);
+  const fovRad=THREE.MathUtils.degToRad(useOrthographic?38:camera.fov); const fitDistance=Math.max(radius/Math.sin(fovRad/2)*1.18,radius*2.25);
+  camera.near=Math.max(.005,radius/1000); camera.far=Math.max(150,radius*80);
+  let orthoHalfHeight=Math.max(radius*1.32,1.4);
+  if(useOrthographic){
+    controls.minZoom=.35; controls.maxZoom=5.5; camera.zoom=1;
+  }else{
+    controls.minDistance=Math.max(radius*.45,.25); controls.maxDistance=Math.max(radius*12,12);
+  }
+  camera.updateProjectionMatrix();
   const groundY=fitBox?fitBox.min.y-.05:center.y-radius*.55;
   const grid=new THREE.GridHelper(Math.max(radius*3.2,3),10,0xcbd5e1,0xe2e8f0); grid.position.set(center.x,groundY,center.z); grid.material.transparent=true; grid.material.opacity=.16; scene.add(grid);
-  const cp=Array.isArray(step.camera_position)&&step.camera_position.length===3?step.camera_position:null,ct=Array.isArray(step.camera_target)&&step.camera_target.length===3?step.camera_target:null;
+  const sourceCp=Array.isArray(sourceView?.camera_position)&&sourceView.camera_position.length===3?sourceView.camera_position:null;
+  const sourceCt=Array.isArray(sourceView?.camera_target)&&sourceView.camera_target.length===3?sourceView.camera_target:null;
+  const cp=Array.isArray(step.camera_position)&&step.camera_position.length===3?step.camera_position:sourceCp;
+  const ct=Array.isArray(step.camera_target)&&step.camera_target.length===3?step.camera_target:sourceCt;
   let targetLook=new THREE.Vector3(...(ct?ct:[center.x,center.y,center.z]));
   // Reject model-supplied camera targets/positions that are wildly outside the reconstructed solid.
   if(targetLook.distanceTo(center)>radius*3.5) targetLook=center.clone();
@@ -1170,28 +1191,45 @@ export default async function(component) {
       btn.classList.toggle('is-active',btn.dataset.action===mode);
     }
   };
-  const moveCamera=(position,look=center)=>{
+  const resetZoom=()=>{ if(useOrthographic){camera.zoom=1;camera.updateProjectionMatrix();} };
+  const moveCamera=(position,look=center,up=null)=>{
     cameraTweenActive=false;
-    camera.position.copy(position); controls.target.copy(look); camera.lookAt(look); controls.update();
+    if(up&&up.length===3) camera.up.set(Number(up[0]),Number(up[1]),Number(up[2])).normalize();
+    camera.position.copy(position); controls.target.copy(look); camera.lookAt(look); resetZoom(); controls.update();
+  };
+  const sourceViewPosition=()=>{
+    const p=Array.isArray(sourceView?.camera_position)&&sourceView.camera_position.length===3
+      ? new THREE.Vector3(...sourceView.camera_position)
+      : new THREE.Vector3(center.x+fitDistance*.72,center.y+fitDistance*.48,center.z+fitDistance*.72);
+    const t=Array.isArray(sourceView?.camera_target)&&sourceView.camera_target.length===3
+      ? new THREE.Vector3(...sourceView.camera_target):center.clone();
+    return {p,t,up:Array.isArray(sourceView?.camera_up)?sourceView.camera_up:null};
   };
   const standardView=(name)=>{
     const d=fitDistance;
-    if(name==='front') moveCamera(new THREE.Vector3(center.x,center.y,center.z+d),center);
-    else if(name==='top') moveCamera(new THREE.Vector3(center.x,center.y+d,center.z+.001),center);
-    else if(name==='side') moveCamera(new THREE.Vector3(center.x+d,center.y,center.z),center);
-    else moveCamera(new THREE.Vector3(center.x+d*.72,center.y+d*.48,center.z+d*.72),center);
+    if(name==='source'){const sv=sourceViewPosition();moveCamera(sv.p,sv.t,sv.up);}
+    else if(name==='front') moveCamera(new THREE.Vector3(center.x,center.y,center.z+d),center,[0,1,0]);
+    else if(name==='top') moveCamera(new THREE.Vector3(center.x,center.y+d,center.z+.001),center,[0,0,-1]);
+    else if(name==='side') moveCamera(new THREE.Vector3(center.x+d,center.y,center.z),center,[0,1,0]);
+    else moveCamera(new THREE.Vector3(center.x+d*.72,center.y+d*.48,center.z+d*.72),center,[0,1,0]);
   };
   const toolbarHandler=(event)=>{
     const btn=event.target.closest('button[data-action]'); if(!btn)return;
     event.preventDefault();event.stopPropagation();const action=btn.dataset.action;
     if(action==='rotate'||action==='pan') setInteractionMode(action);
-    else if(action==='home'||action==='iso') standardView('iso');
+    else if(action==='home') standardView(sourceView?'source':'iso');
     else standardView(action);
   };
   toolbar?.addEventListener('click',toolbarHandler);
   setInteractionMode('rotate');
 
-  const resize=()=>{const w=Math.max(stage.clientWidth,320),h=Math.max(stage.clientHeight,390);renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();};resize();const ro=new ResizeObserver(resize);ro.observe(stage);
+  const resize=()=>{
+    const w=Math.max(stage.clientWidth,320),h=Math.max(stage.clientHeight,390);renderer.setSize(w,h,false);
+    const aspect=w/h;
+    if(useOrthographic){camera.left=-orthoHalfHeight*aspect;camera.right=orthoHalfHeight*aspect;camera.top=orthoHalfHeight;camera.bottom=-orthoHalfHeight;}
+    else camera.aspect=aspect;
+    camera.updateProjectionMatrix();
+  };resize();const ro=new ResizeObserver(resize);ro.observe(stage);
   let raf=0;const animateFrame=(now)=>{raf=requestAnimationFrame(animateFrame);
     if(cameraTweenActive){
       const ctween=Math.min(1,(now-camStart)/camDuration);const ce=1-Math.pow(1-ctween,3);camera.position.lerpVectors(pcp,targetPos,ce);controls.target.lerpVectors(pct,targetLook,ce);
@@ -1243,7 +1281,39 @@ def _visual_plan_is_recommended(analysis: VisualExplanationResult | GeminiAnalys
     return any(token in haystack for token in keywords)
 
 
-def render_visual_explanation(plan: VisualExplanationResult) -> None:
+def _render_source_3d_reference(plan: VisualExplanationResult, question_files: list[Any] | None) -> None:
+    """Show the exact source isometric/orthographic drawing used to calibrate the 3D model."""
+    if plan.mode != "geometry3d" or plan.scene_3d is None or not question_files:
+        return
+    source_view = getattr(plan.scene_3d, "source_view", None)
+    if source_view is None:
+        return
+    source_index = int(getattr(source_view, "source_index", 1) or 1)
+    page_number = int(getattr(source_view, "page_number", 1) or 1)
+    if not (1 <= source_index <= len(question_files)):
+        return
+    image = _question_source_image(question_files[source_index - 1], page_number)
+    if image is None:
+        return
+    box = list(getattr(source_view, "diagram_box_2d", []) or [])
+    if len(box) == 4:
+        px = _normalized_box_to_pixels(box, image.width, image.height)
+        if px is not None:
+            x1, y1, x2, y2 = px
+            pad_x = max(8, int((x2 - x1) * 0.04))
+            pad_y = max(8, int((y2 - y1) * 0.04))
+            image = image.crop((max(0, x1-pad_x), max(0, y1-pad_y), min(image.width, x2+pad_x), min(image.height, y2+pad_y)))
+    with st.expander("Compare with the question's original 3D/isometric view", expanded=True):
+        st.image(image, caption="Source diagram used to calibrate the 3D model", use_container_width=True)
+        projection = str(getattr(source_view, "projection", "unknown")).replace("_", " ").title()
+        confidence = str(getattr(source_view, "match_confidence", "medium")).title()
+        st.caption(f"Source-view projection: {projection} · Match confidence: {confidence}")
+        note = str(getattr(source_view, "match_note", "")).strip()
+        if note:
+            st.caption(note)
+
+
+def render_visual_explanation(plan: VisualExplanationResult, question_files: list[Any] | None = None) -> None:
     if plan.mode == "none":
         if plan.reconstruction_note:
             st.info("A reliable interactive reconstruction was not generated: " + plan.reconstruction_note)
@@ -1257,6 +1327,8 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
     )
     if plan.mode == "geometry3d" and getattr(plan, "reconstructed_parts", None):
         st.markdown("**3D form identified from the question:** " + " · ".join(plan.reconstructed_parts))
+    if plan.mode == "geometry3d":
+        _render_source_3d_reference(plan, question_files)
     max_index = len(plan.steps) - 1
     idx = max(0, min(int(st.session_state.get("ai_visual_step", 0)), max_index))
     st.session_state.ai_visual_step = idx
@@ -2224,7 +2296,7 @@ with ai_tab:
         visual_plan: VisualExplanationResult | None = st.session_state.ai_visual_explanation
         if visual_plan is not None:
             st.markdown("---")
-            render_visual_explanation(visual_plan)
+            render_visual_explanation(visual_plan, q_files)
         elif st.session_state.ai_visual_error:
             st.caption("Interactive visual explanation unavailable for this attempt: " + st.session_state.ai_visual_error)
         st.markdown("---")

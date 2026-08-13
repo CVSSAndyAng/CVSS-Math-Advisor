@@ -254,7 +254,38 @@ class VisualExtrusion3D(BaseModel):
     label: str = ""
 
 
+class VisualSourceView3D(BaseModel):
+    source_index: int = Field(ge=1, default=1, description="1-based uploaded question source containing the 3D/isometric diagram")
+    page_number: int = Field(ge=1, default=1, description="1-based PDF page; use 1 for an image upload")
+    diagram_box_2d: list[int] = Field(
+        default_factory=list,
+        description="Optional [ymin,xmin,ymax,xmax] crop of the source isometric diagram, normalized to 0..1000",
+    )
+    projection: Literal["isometric", "orthographic", "oblique", "perspective", "unknown"] = "unknown"
+    camera_position: list[float] = Field(
+        default_factory=list,
+        description="[x,y,z] camera position that best reproduces the orientation seen in the original question diagram",
+    )
+    camera_target: list[float] = Field(
+        default_factory=list,
+        description="[x,y,z] point the source-view camera looks at",
+    )
+    camera_up: list[float] = Field(
+        default_factory=lambda: [0.0, 1.0, 0.0],
+        description="[x,y,z] camera up vector chosen to match the page orientation",
+    )
+    match_confidence: Literal["high", "medium", "low"] = "medium"
+    match_note: str = Field(
+        default="",
+        description="Explain how the reconstructed 3D orientation/silhouette was matched to the source isometric drawing and any unavoidable ambiguity",
+    )
+
+
 class VisualScene3D(BaseModel):
+    source_view: VisualSourceView3D | None = Field(
+        default=None,
+        description="Source-view calibration for uploaded isometric/orthographic 3D diagrams. Use this so the default 3D camera matches the question image rather than a generic isometric view.",
+    )
     vertices: list[VisualVertex3D] = Field(default_factory=list)
     edges: list[VisualEdge3D] = Field(default_factory=list)
     faces: list[VisualFace3D] = Field(default_factory=list)
@@ -793,6 +824,26 @@ def _sanitize_visual_explanation(result: VisualExplanationResult) -> VisualExpla
         valid_ids.update(x.id for x in scene.spheres)
         valid_ids.update(x.id for x in scene.extrusions)
         solid_count = len(scene.boxes) + len(scene.cylinders) + len(scene.cones) + len(scene.spheres) + len(scene.extrusions)
+        source_view = scene.source_view
+        if source_view is not None:
+            if len(source_view.diagram_box_2d) not in {0, 4}:
+                source_view.diagram_box_2d = []
+            if len(source_view.camera_position) not in {0, 3}:
+                source_view.camera_position = []
+            if len(source_view.camera_target) not in {0, 3}:
+                source_view.camera_target = []
+            if len(source_view.camera_up) != 3:
+                source_view.camera_up = [0.0, 1.0, 0.0]
+            # An uploaded isometric/orthographic exam diagram should never be replaced by
+            # a differently oriented "nice-looking" solid. Hide low-confidence mappings.
+            if source_view.projection in {"isometric", "orthographic", "oblique"} and source_view.match_confidence == "low":
+                result.mode = "none"
+                result.scene_3d = None
+                result.reconstruction_note = (
+                    result.reconstruction_note
+                    + " The tutor could not match the reconstructed 3D view reliably to the source isometric/orthographic drawing, so the 3D model was hidden rather than showing a misleading orientation."
+                ).strip()
+                return result
         physical_words = " ".join(result.reconstructed_parts + [result.reconstruction_note, result.title]).lower()
         if solid_count == 0 and any(word in physical_words for word in ("cuboid", "block", "cylinder", "cone", "sphere", "prism", "composite solid")):
             result.mode = "none"
@@ -925,6 +976,11 @@ RECONSTRUCTION SAFETY
 - For coordinate graphs, use the actual coordinates/scales from the question where known.
 - For 3D solids, first reconstruct the PHYSICAL FORM of the object, not merely its labelled vertices. Identify every component solid visible/stated in the question (for example cuboid, cylinder, cone, triangular prism, trapezoidal prism, pyramid/sphere-like part).
 - If the question provides front/top/side or other orthographic views, treat them as views of ONE object. Match shared dimensions and component positions across views before building the 3D scene.
+- SOURCE-VIEW FIDELITY IS MANDATORY for an uploaded isometric/orthographic/oblique 3D diagram. The reconstructed 3D solid must be oriented so its DEFAULT camera view resembles the source drawing: the same visible faces, same left/right/top ordering, same stacking/contact relationships, and the same dominant edge-direction families.
+- Populate scene_3d.source_view whenever a 3D diagram is visible in an uploaded source. Set source_index/page_number and diagram_box_2d around the actual isometric diagram when practical.
+- Determine whether the printed drawing is isometric, orthographic/axonometric, oblique, or perspective. For normal exam isometric/orthographic drawings, use projection="isometric" or "orthographic" and provide camera_position, camera_target and camera_up that reproduce the PAGE ORIENTATION. Do not substitute a generic camera merely because it looks attractive.
+- Treat the source-view camera as a calibration target. Before returning the model, mentally project the solid from that camera and compare it with the source: component silhouette, which faces are visible, relative component centres, major sloping-edge directions, and which parts overlap/occlude.
+- For a source isometric/orthographic/oblique diagram, set source_view.match_confidence="high" only when the reconstructed default view is genuinely consistent with the source. If you cannot reach at least medium confidence, return mode="none" rather than a mismatched 3D model.
 - Preserve every stated dimension and ratio. NEVER invent a numerical dimension just to make the model look attractive. If some dimensions are not given, use a schematic normalized dimension only for visual placement and explicitly say which proportions are schematic in reconstruction_note.
 - Use scene_3d.boxes for cuboids, cylinders for cylindrical parts, cones for cones, spheres for spherical parts, and extrusions for triangular/trapezoidal/other constant-cross-section prisms. Use vertices/edges/faces mainly for named points, mathematical construction lines, sections, diagonals and angle overlays.
 - A composite-solid/volume question in geometry3d MUST contain solid primitives (box/cylinder/cone/sphere/extrusion), not only isolated vertices and line segments. If you cannot reconstruct the physical solids reliably, return mode="none".
@@ -966,7 +1022,7 @@ STEP-BY-STEP PEDAGOGY — STRICT ALIGNMENT
 - Explanations must be concise and student-friendly. Put any mathematical expressions in \( ... \) transport delimiters for MathIO rendering.
 
 3D-SPECIFIC TEACHING
-- The first visual state must look recognisably like the physical solid in the question. A cloud of labelled points is not acceptable for a composite 3D solid. If the solid cannot be recognised from the solid primitives alone, return mode="none" rather than a misleading 3D view.
+- The first visual state must look recognisably like the physical solid in the question AND, when there is an uploaded isometric/orthographic drawing, the default camera must reproduce that source orientation as closely as the available evidence allows. A cloud of labelled points or a recognisable-but-differently-oriented solid is not acceptable. If the solid cannot be recognised and source-aligned from the solid primitives alone, return mode="none" rather than a misleading 3D view.
 - For composite volume/surface-area questions, show the assembled solid, then visually isolate/highlight the exact component being calculated at each corrected step (base prism, cylinder, top block, etc.), then reunite/highlight the final total.
 - For a 3D angle/length question, explicitly reveal the 2D triangle or cross-section inside the solid before applying trigonometry or Pythagoras.
 - Use reveal_ids so that auxiliary diagonal/cross-section edges appear only when the matching corrected step needs them, and animate_ids so those edges visibly grow into place. Physical solid components may remain visible throughout and be dimmed when not in focus.
