@@ -496,10 +496,136 @@ class PracticeEvaluation(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
+
+
+class GeometryBoundaryItem(BaseModel):
+    order: int = Field(ge=1, description="Boundary order when tracing clockwise or anticlockwise")
+    role: Literal["outer", "excluded", "internal"]
+    kind: Literal["segment", "arc", "curve", "ray", "other"]
+    label: str = Field(description="Short boundary label such as AB, arc BC, or y = f(x)")
+    description: str = Field(description="What this boundary is and how it contributes to the region")
+
+
+class MathVerificationResult(BaseModel):
+    status: Literal["verified", "verified_with_caveats", "needs_clarification", "could_not_verify"]
+    problem_type: Literal[
+        "arithmetic", "algebra", "indices", "surds", "coordinate_geometry", "graph",
+        "geometry", "shaded_area", "trigonometry", "mensuration", "statistics",
+        "probability", "matrix", "sequence", "other"
+    ]
+    interpreted_goal: str
+    assumptions: list[str] = Field(default_factory=list)
+    geometry_boundaries: list[GeometryBoundaryItem] = Field(default_factory=list)
+    boundary_check_complete: bool = Field(
+        default=True,
+        description="For shaded-area questions, true only after every outer and excluded/internal boundary has been identified."
+    )
+    verified_facts: list[str] = Field(default_factory=list, description="Concise independently checked mathematical facts")
+    contradictions_or_uncertainties: list[str] = Field(default_factory=list)
+    verified_answer_mathio: str = Field(default="", description="Verified answer as MathIO-ready raw LaTeX when appropriate")
+    verification_summary: str
+    code_execution_used: bool = Field(default=False, description="Set by the app after inspecting interaction steps")
+    confidence: Literal["high", "medium", "low"]
+
+
 class GeminiTutorError(RuntimeError):
     def __init__(self, message: str, category: str = "service") -> None:
         super().__init__(message)
         self.category = category
+
+
+
+
+def _code_execution_tool() -> list[dict[str, str]]:
+    # Interactions API built-in Python sandbox. Do not add temperature/top_p/top_k for Gemini 3.x.
+    return [{"type": "code_execution"}]
+
+
+def _interaction_used_code_execution(interaction: object) -> bool:
+    for step in getattr(interaction, "steps", []) or []:
+        if getattr(step, "type", "") in {"code_execution_call", "code_execution_result"}:
+            return True
+    return False
+
+
+def verify_question_math(
+    *,
+    track_label: str,
+    question_text: str,
+    question_assets: list[UploadedAsset] | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+) -> MathVerificationResult:
+    """Independent verification pass before marking student work.
+
+    Uses Gemini's built-in Python code execution for calculable claims. For shaded-area
+    geometry, the boundary trace is mandatory before any area equation is accepted.
+    """
+    question_assets = question_assets or []
+    if not question_text.strip() and not question_assets:
+        raise GeminiTutorError("Provide the question before verification.", category="input")
+
+    prompt = f"""
+You are the independent mathematical verifier for a Singapore secondary mathematics tutor ({track_label}).
+Inspect the QUESTION ONLY. Your job is verification, not tutoring style and not marking the student's solution.
+
+ACCURACY PROTOCOL
+1. Treat every problem as unique. Never choose a formula merely because the diagram resembles a familiar example.
+2. For every arithmetic/algebraic/numerical claim that can be checked computationally, USE the Python code-execution tool before finalising the JSON.
+3. Independently check equations, roots, fractions, indices, trigonometric values, coordinates, matrices, statistics and generated numeric answers.
+4. Do not force Python for a purely conceptual statement when there is nothing useful to calculate.
+5. If the diagram, labels, wording, domain or givens are unclear, report uncertainty instead of guessing.
+
+MANDATORY GEOMETRY BOUNDARY PROTOCOL
+- If this is a shaded-region AREA question, set problem_type="shaded_area".
+- BEFORE forming any area equation, trace the shaded region clockwise or anticlockwise.
+- Explicitly list EVERY outer boundary line/arc/curve and EVERY excluded/internal boundary.
+- geometry_boundaries must contain those boundaries in order.
+- boundary_check_complete may be true only if the boundary trace closes and no relevant edge/arc is omitted.
+- If the boundaries cannot be identified reliably from the question, use status="needs_clarification" and boundary_check_complete=false.
+- Never infer a composite-area formula until this boundary check is complete.
+
+QUESTION TEXT:
+{question_text.strip() or '[Question supplied only by attachment]'}
+
+OUTPUT RULES
+- Return structured JSON only.
+- verified_answer_mathio is raw MathIO-ready LaTeX with no $ delimiters.
+- Keep verification_summary short and factual.
+""".strip()
+
+    inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for i, asset in enumerate(question_assets, 1):
+        inputs.append({"type": "text", "text": f"Question source {i}: {asset.name}"})
+        inputs.append(_encode_asset(asset))
+
+    active_client = client or _make_client(api_key)
+    try:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=inputs,
+            tools=_code_execution_tool(),
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": MathVerificationResult.model_json_schema(),
+            },
+        )
+        result = MathVerificationResult.model_validate_json(interaction.output_text)
+        result.code_execution_used = _interaction_used_code_execution(interaction)
+    except ValidationError as exc:
+        raise GeminiTutorError(
+            "The independent verifier returned an unexpected structure. Please try again.",
+            category="format",
+        ) from exc
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
+
+    if result.problem_type == "shaded_area" and not result.boundary_check_complete:
+        result.status = "needs_clarification"
+    return result
 
 
 def required_parts_for_question(question: object) -> list[str]:
@@ -593,6 +719,8 @@ SAFETY AND RELIABILITY
 - If handwriting is too unclear to know what was written, use status `unclear` rather than inventing a presentation error.
 - When presentation_error=true, set issue_type=`presentation` and explain exactly what notation makes the line invalid or ambiguous.
 - A different valid method is acceptable.
+- SHADED-AREA RULE: before writing any area equation, explicitly identify every outer boundary segment/arc/curve and every excluded/internal boundary of the shaded region. If the boundary does not close or is ambiguous, do not guess an area formula.
+- Use the independent verification evidence below as a cross-check, but still inspect the student's visible reasoning yourself.
 - Provide exactly three targeted practice questions: Near transfer, Varied context, and Stretch.
 - Each practice question must be original, solvable, syllabus-appropriate, and have a verified answer and worked solution.
 - PRACTICE FOCUS UI: focus_prompt must be ONE short action sentence (ideally 6-16 words) containing only what the student must find/show. Put every given value/condition in key_information instead. Never repeat the story or givens in focus_prompt. key_information must contain 2 to 5 atomic, concise givens.
@@ -800,6 +928,7 @@ Keep explanations concise and student/teacher friendly.
             model=get_model(model),
             store=False,
             input=interaction_input,
+            tools=_code_execution_tool(),
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
@@ -1188,19 +1317,41 @@ def analyze_submission(
         raise GeminiTutorError("Provide the student's working as text or an upload.", category="input")
 
     active_client = client or _make_client(api_key)
+
+    verification = verify_question_math(
+        track_label=track_label,
+        question_text=question_text,
+        question_assets=question_assets,
+        api_key=api_key,
+        model=model,
+        client=active_client,
+    )
+    if verification.status == "needs_clarification":
+        details = "; ".join(verification.contradictions_or_uncertainties) or verification.verification_summary
+        raise GeminiTutorError(
+            f"The question needs clarification before reliable marking: {details}",
+            category="input",
+        )
+
+    verifier_evidence = verification.model_dump_json(indent=2)
+    combined_evidence = (
+        (offline_evidence.strip() + "\n\n") if offline_evidence.strip() else ""
+    ) + "INDEPENDENT CODE-EXECUTION VERIFICATION:\n" + verifier_evidence
+
     interaction_input = build_analysis_input(
         track_label=track_label,
         question_text=question_text,
         working_text=working_text,
         question_assets=question_assets,
         working_assets=working_assets,
-        offline_evidence=offline_evidence,
+        offline_evidence=combined_evidence,
     )
     try:
         interaction = active_client.interactions.create(
             model=get_model(model),
             store=False,
             input=interaction_input,
+            tools=_code_execution_tool(),
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
@@ -1274,6 +1425,10 @@ HANDWRITTEN WORKING ATTACHMENTS
 - For multi-part questions, identify which required part each visible line addresses.
 - If handwriting is genuinely unreadable or a mathematical statement is incomplete/ambiguous, report that limitation rather than assuming a correct step.
 
+GEOMETRY / SHADED-AREA CHECK
+- If this practice question asks for the area of a shaded region, first list every outer boundary segment/arc/curve and every excluded/internal boundary before accepting any area equation.
+- If the student's area setup ignores a boundary or subtracts/adds a region inconsistent with those boundaries, treat that as a reasoning error even if later arithmetic is correct.
+
 PRESENTATION / MATHEMATICAL-SENSE CHECK
 - Check whether every submitted line is a coherent mathematical statement, separately from checking whether it is mathematically correct.
 - If a line is ill-formed or ambiguous because essential notation, operators, equality signs, brackets, fraction structure, or exponent structure are missing or misplaced, add a concise item to presentation_errors.
@@ -1301,6 +1456,7 @@ In prose feedback fields, write mathematical expressions in LaTeX using \\( ... 
             model=get_model(model),
             store=False,
             input=interaction_input,
+            tools=_code_execution_tool(),
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
@@ -1368,7 +1524,8 @@ ADAPTIVE RULES
 - Do not copy the previous question or merely change one number.
 - Use new values and, where suitable for this category, a different representation or surface form.
 - Keep it appropriate to the selected Singapore O-Level / N-Level track.
-- Independently verify the mathematics.
+- Independently verify the mathematics using code execution for every calculable claim.
+- For shaded-region geometry, explicitly determine every outer and excluded/internal boundary before constructing the reference area equation.
 - Include exactly three progressive hints.
 - Populate focus_prompt with ONE short action sentence (ideally 6-16 words) containing only the task. Put all givens in 2 to 5 atomic key_information items. Never repeat the story in focus_prompt.
 - For every geometry or trigonometry follow-up, populate diagram_2d with a clear schematic using only the givens. For every graph or coordinate-geometry follow-up, populate diagram_2d as an x-y coordinate workspace with show_axes=true and sensible bounds, containing only given points/curves/lines; students can plot and draw on top of it. Do not include answer-derived information. Use null for non-visual questions.
@@ -1396,6 +1553,7 @@ ADAPTIVE RULES
             model=get_model(model),
             store=False,
             input=interaction_input,
+            tools=_code_execution_tool(),
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
