@@ -918,7 +918,7 @@ _VISUAL_3D_HTML = """
     <button type="button" data-action="side">Side</button>
   </div>
   <div class="omt-visual3d-stage"></div>
-  <div class="omt-visual-help">Question view matches the orientation inferred from the uploaded isometric/orthographic drawing. Rotate mode explores the solid; Pan moves it. Use Question view to return to the exam-diagram orientation.</div>
+  <div class="omt-visual-help">Rotate mode explores the solid; Pan moves it. For top/front/side questions, use Front, Top and Side to compare the reconstruction with the source views.</div>
 </div>
 """
 
@@ -1011,7 +1011,14 @@ export default async function(component) {
   const sceneData=data?.scene||{}, step=data?.step||{};
   const sourceView=sceneData.source_view||null;
   const sourceProjection=String(sourceView?.projection||'unknown').toLowerCase();
-  const useOrthographic=['isometric','orthographic','oblique'].includes(sourceProjection);
+  const isOrthographicSet=sourceProjection==='orthographic_set';
+  const useOrthographic=['isometric','orthographic','orthographic_set','oblique'].includes(sourceProjection);
+  const sourceButton=toolbar?.querySelector('button[data-action="source"]');
+  const help=parentElement.querySelector('.omt-visual-help');
+  if(isOrthographicSet){
+    if(sourceButton) sourceButton.textContent='Reconstruction view';
+    if(help) help.textContent='This question provides top/front/side orthographic views, not a single isometric source view. Use Front, Top and Side to compare the reconstructed solid with the question; Rotate/Pan are for exploration.';
+  }
   const highlight=new Set(step.highlight_ids||[]), dim=new Set(step.dim_ids||[]);
   const explicitAnimate=new Set(data?.animate_ids||step.animate_ids||[]);
   const animate=new Set([...(step.highlight_ids||[]), ...explicitAnimate]);
@@ -1207,7 +1214,10 @@ export default async function(component) {
   };
   const standardView=(name)=>{
     const d=fitDistance;
-    if(name==='source'){const sv=sourceViewPosition();moveCamera(sv.p,sv.t,sv.up);}
+    if(name==='source'){
+      if(isOrthographicSet) moveCamera(new THREE.Vector3(center.x+d*.72,center.y+d*.48,center.z+d*.72),center,[0,1,0]);
+      else {const sv=sourceViewPosition();moveCamera(sv.p,sv.t,sv.up);}
+    }
     else if(name==='front') moveCamera(new THREE.Vector3(center.x,center.y,center.z+d),center,[0,1,0]);
     else if(name==='top') moveCamera(new THREE.Vector3(center.x,center.y+d,center.z+.001),center,[0,0,-1]);
     else if(name==='side') moveCamera(new THREE.Vector3(center.x+d,center.y,center.z),center,[0,1,0]);
@@ -1303,11 +1313,36 @@ def _render_source_3d_reference(plan: VisualExplanationResult, question_files: l
             pad_x = max(8, int((x2 - x1) * 0.04))
             pad_y = max(8, int((y2 - y1) * 0.04))
             image = image.crop((max(0, x1-pad_x), max(0, y1-pad_y), min(image.width, x2+pad_x), min(image.height, y2+pad_y)))
-    with st.expander("Compare with the question's original 3D/isometric view", expanded=True):
-        st.image(image, caption="Source diagram used to calibrate the 3D model", use_container_width=True)
-        projection = str(getattr(source_view, "projection", "unknown")).replace("_", " ").title()
+    projection_raw = str(getattr(source_view, "projection", "unknown"))
+    is_orthographic_set = projection_raw == "orthographic_set"
+    title = "Compare reconstruction with the question's top/front/side views" if is_orthographic_set else "Compare with the question's original 3D/isometric view"
+    caption = "Orthographic source views used to reconstruct the 3D object" if is_orthographic_set else "Source diagram used to calibrate the 3D model"
+    with st.expander(title, expanded=True):
+        st.image(image, caption=caption, use_container_width=True)
+        projection = projection_raw.replace("_", " ").title()
         confidence = str(getattr(source_view, "match_confidence", "medium")).title()
-        st.caption(f"Source-view projection: {projection} · Match confidence: {confidence}")
+        if is_orthographic_set:
+            st.caption(f"Source type: {projection} · Projection-consistency confidence: {confidence}")
+            st.info("This question does not provide a single isometric drawing. The 3D model is reconstructed by combining the top, front and side projections. Use the Top, Front and Side buttons in the 3D viewer to verify the reconstruction.")
+        else:
+            st.caption(f"Source-view projection: {projection} · Match confidence: {confidence}")
+        checks = list(getattr(source_view, "view_consistency_checks", []) or [])
+        if checks:
+            st.markdown("**Projection checks**")
+            for check in checks:
+                st.markdown(f"- {check}")
+        if is_orthographic_set:
+            components = list(getattr(plan.scene_3d, "orthographic_components", []) or [])
+            if components:
+                st.markdown("**How the 3D form was inferred from the three views**")
+                for item in sorted(components, key=lambda x: int(getattr(x, "vertical_order", 0))):
+                    kind = str(getattr(item, "inferred_kind", "component")).replace("_", " ").title()
+                    relation = str(getattr(item, "stacking_relation", "")).strip()
+                    st.markdown(f"**{kind}**" + (f" — {relation}" if relation else ""))
+                    cols = st.columns(3)
+                    cols[0].caption("Top: " + str(getattr(item, "top_view_evidence", "")))
+                    cols[1].caption("Front: " + str(getattr(item, "front_view_evidence", "")))
+                    cols[2].caption("Side: " + str(getattr(item, "side_view_evidence", "")))
         note = str(getattr(source_view, "match_note", "")).strip()
         if note:
             st.caption(note)

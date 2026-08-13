@@ -261,7 +261,7 @@ class VisualSourceView3D(BaseModel):
         default_factory=list,
         description="Optional [ymin,xmin,ymax,xmax] crop of the source isometric diagram, normalized to 0..1000",
     )
-    projection: Literal["isometric", "orthographic", "oblique", "perspective", "unknown"] = "unknown"
+    projection: Literal["isometric", "orthographic", "orthographic_set", "oblique", "perspective", "unknown"] = "unknown"
     camera_position: list[float] = Field(
         default_factory=list,
         description="[x,y,z] camera position that best reproduces the orientation seen in the original question diagram",
@@ -277,14 +277,32 @@ class VisualSourceView3D(BaseModel):
     match_confidence: Literal["high", "medium", "low"] = "medium"
     match_note: str = Field(
         default="",
-        description="Explain how the reconstructed 3D orientation/silhouette was matched to the source isometric drawing and any unavoidable ambiguity",
+        description="Explain how the reconstructed 3D form/view was matched to the source evidence and any unavoidable ambiguity",
     )
+    view_consistency_checks: list[str] = Field(
+        default_factory=list,
+        description="For orthographic_set sources, concise checks showing how the reconstructed solid reproduces the top, front and side views",
+    )
+
+
+class OrthographicComponentEvidence3D(BaseModel):
+    primitive_id: str = Field(description="Id of the solid primitive this evidence describes")
+    inferred_kind: Literal["cuboid", "cylinder", "cone", "sphere", "trapezoidal_prism", "triangular_prism", "other_prism", "other"]
+    vertical_order: int = Field(ge=0, description="0 for the lowest component, increasing upward")
+    top_view_evidence: str = Field(default="", description="What in the top view supports this component/footprint")
+    front_view_evidence: str = Field(default="", description="What in the front view supports this component/profile")
+    side_view_evidence: str = Field(default="", description="What in the side view supports this component/profile")
+    stacking_relation: str = Field(default="", description="How this component touches/sits above/below other components, including occlusion evidence")
 
 
 class VisualScene3D(BaseModel):
     source_view: VisualSourceView3D | None = Field(
         default=None,
-        description="Source-view calibration for uploaded isometric/orthographic 3D diagrams. Use this so the default 3D camera matches the question image rather than a generic isometric view.",
+        description="Source evidence for a single 3D view or a labelled top/front/side orthographic set.",
+    )
+    orthographic_components: list[OrthographicComponentEvidence3D] = Field(
+        default_factory=list,
+        description="For orthographic_set sources, one evidence record per reconstructed physical solid component, linked to the actual rendered primitive id.",
     )
     vertices: list[VisualVertex3D] = Field(default_factory=list)
     edges: list[VisualEdge3D] = Field(default_factory=list)
@@ -834,16 +852,34 @@ def _sanitize_visual_explanation(result: VisualExplanationResult) -> VisualExpla
                 source_view.camera_target = []
             if len(source_view.camera_up) != 3:
                 source_view.camera_up = [0.0, 1.0, 0.0]
-            # An uploaded isometric/orthographic exam diagram should never be replaced by
-            # a differently oriented "nice-looking" solid. Hide low-confidence mappings.
-            if source_view.projection in {"isometric", "orthographic", "oblique"} and source_view.match_confidence == "low":
+            # Never show a low-confidence 3D reconstruction.
+            if source_view.projection in {"isometric", "orthographic", "orthographic_set", "oblique"} and source_view.match_confidence == "low":
                 result.mode = "none"
                 result.scene_3d = None
                 result.reconstruction_note = (
                     result.reconstruction_note
-                    + " The tutor could not match the reconstructed 3D view reliably to the source isometric/orthographic drawing, so the 3D model was hidden rather than showing a misleading orientation."
+                    + " The tutor could not match the reconstructed 3D form reliably to the source diagram(s), so the 3D model was hidden rather than showing a misleading reconstruction."
                 ).strip()
                 return result
+            if source_view.projection == "orthographic_set":
+                solid_ids = {x.id for x in scene.boxes + scene.cylinders + scene.cones + scene.spheres + scene.extrusions}
+                evidence = list(scene.orthographic_components or [])
+                check_text = " ".join(source_view.view_consistency_checks or []).lower()
+                has_view_checks = all(name in check_text for name in ("top", "front", "side"))
+                evidence_ids = {item.primitive_id for item in evidence}
+                evidence_complete = bool(evidence) and evidence_ids == solid_ids
+                each_uses_views = all(
+                    item.top_view_evidence.strip() and item.front_view_evidence.strip() and item.side_view_evidence.strip()
+                    for item in evidence
+                )
+                if not (has_view_checks and evidence_complete and each_uses_views):
+                    result.mode = "none"
+                    result.scene_3d = None
+                    result.reconstruction_note = (
+                        result.reconstruction_note
+                        + " The top/front/side reconstruction did not contain enough cross-view evidence to validate every physical component, so the 3D model was hidden."
+                    ).strip()
+                    return result
         physical_words = " ".join(result.reconstructed_parts + [result.reconstruction_note, result.title]).lower()
         if solid_count == 0 and any(word in physical_words for word in ("cuboid", "block", "cylinder", "cone", "sphere", "prism", "composite solid")):
             result.mode = "none"
@@ -975,12 +1011,23 @@ RECONSTRUCTION SAFETY
 - A schematic geometry drawing may use convenient coordinates that are NOT to scale, provided incidences and stated relationships are preserved. Say this in reconstruction_note.
 - For coordinate graphs, use the actual coordinates/scales from the question where known.
 - For 3D solids, first reconstruct the PHYSICAL FORM of the object, not merely its labelled vertices. Identify every component solid visible/stated in the question (for example cuboid, cylinder, cone, triangular prism, trapezoidal prism, pyramid/sphere-like part).
-- If the question provides front/top/side or other orthographic views, treat them as views of ONE object. Match shared dimensions and component positions across views before building the 3D scene.
-- SOURCE-VIEW FIDELITY IS MANDATORY for an uploaded isometric/orthographic/oblique 3D diagram. The reconstructed 3D solid must be oriented so its DEFAULT camera view resembles the source drawing: the same visible faces, same left/right/top ordering, same stacking/contact relationships, and the same dominant edge-direction families.
-- Populate scene_3d.source_view whenever a 3D diagram is visible in an uploaded source. Set source_index/page_number and diagram_box_2d around the actual isometric diagram when practical.
-- Determine whether the printed drawing is isometric, orthographic/axonometric, oblique, or perspective. For normal exam isometric/orthographic drawings, use projection="isometric" or "orthographic" and provide camera_position, camera_target and camera_up that reproduce the PAGE ORIENTATION. Do not substitute a generic camera merely because it looks attractive.
-- Treat the source-view camera as a calibration target. Before returning the model, mentally project the solid from that camera and compare it with the source: component silhouette, which faces are visible, relative component centres, major sloping-edge directions, and which parts overlap/occlude.
-- For a source isometric/orthographic/oblique diagram, set source_view.match_confidence="high" only when the reconstructed default view is genuinely consistent with the source. If you cannot reach at least medium confidence, return mode="none" rather than a mismatched 3D model.
+- If the question provides labelled TOP / FRONT / SIDE views, this is an ORTHOGRAPHIC SET, not an isometric source view. Set scene_3d.source_view.projection="orthographic_set". Do NOT try to make one camera angle "match" all three views. Instead reconstruct ONE 3D object whose projections reproduce all three source views.
+- ORTHOGRAPHIC FUSION PROCEDURE (mandatory when top/front/side views are present):
+  1. Read the TOP view as the horizontal footprint (x-z): outer silhouette, internal footprint boundaries, circles, squares/rectangles, centres and overlaps.
+  2. Read the FRONT view as the x-y profile: widths, vertical stacking order, trapezoidal/triangular/rectangular profiles and height changes.
+  3. Read the SIDE view as the z-y profile: depths, vertical stacking order and whether a front-profile shape is an extrusion/prism.
+  4. Match features across views before choosing primitives. A component must be consistent in all views in which it appears.
+  5. Use occlusion/top-view evidence to determine stacking. Example: if a circle is visibly inside a square footprint in the TOP view while FRONT and SIDE show two same-width stacked rectangles, the circular component is above the square-section component; if the square component were topmost it would hide the circle.
+  6. General silhouette rules: a FRONT trapezoid + SIDE rectangle + TOP rectangular footprint is a trapezoidal prism extruded in depth; a TOP circle + FRONT/SIDE rectangles is a vertical cylinder; a TOP square/rectangle + FRONT/SIDE rectangles is a cuboid/rectangular prism.
+  7. Re-project the candidate model mentally into TOP, FRONT and SIDE views. Check the external silhouette, internal boundaries, footprint shapes, component centres, widths/depths and vertical ordering against the source. Populate source_view.view_consistency_checks with at least one check for each available view.
+  8. Set source_view.match_confidence="high" only if ALL source views are mutually reproduced. If one view contradicts the candidate model or the stacking is ambiguous, return mode="none" rather than a plausible-looking but wrong 3D object.
+- For an orthographic_set source, choose camera_position only as a clear EXPLORATION/isometric view of the reconstructed solid. It is not a source-view calibration. The student should use the Front/Top/Side buttons to compare the model against the original projections.
+- SOURCE-VIEW FIDELITY remains mandatory for a SINGLE uploaded isometric/oblique/perspective drawing. For those sources, the reconstructed 3D solid must be oriented so its DEFAULT camera view resembles the source drawing: the same visible faces, same left/right/top ordering, same stacking/contact relationships, and the same dominant edge-direction families.
+- Populate scene_3d.source_view whenever a 3D diagram or orthographic set is visible in an uploaded source. Set source_index/page_number and diagram_box_2d around the relevant diagram set when practical.
+- For projection="orthographic_set", populate scene_3d.orthographic_components with ONE record per physical solid component. Each record must cite what the TOP, FRONT and SIDE views contribute to that inference, the component's bottom-to-top vertical_order, and the stacking/occlusion relation. The primitive_id must match an actual box/cylinder/cone/sphere/extrusion id in scene_3d. This evidence is mandatory; do not return a 3D model from orthographic views without it.
+- Determine whether the source is a single isometric/orthographic/oblique/perspective view OR a labelled orthographic_set. Do not confuse a set of top/front/side views with an isometric drawing.
+- For a single source view, treat the source-view camera as a calibration target. Before returning the model, mentally project the solid from that camera and compare it with the source: component silhouette, which faces are visible, relative component centres, major sloping-edge directions, and which parts overlap/occlude.
+- For a single isometric/orthographic/oblique diagram, set source_view.match_confidence="high" only when the reconstructed default view is genuinely consistent with that source. If you cannot reach at least medium confidence, return mode="none" rather than a mismatched 3D model.
 - Preserve every stated dimension and ratio. NEVER invent a numerical dimension just to make the model look attractive. If some dimensions are not given, use a schematic normalized dimension only for visual placement and explicitly say which proportions are schematic in reconstruction_note.
 - Use scene_3d.boxes for cuboids, cylinders for cylindrical parts, cones for cones, spheres for spherical parts, and extrusions for triangular/trapezoidal/other constant-cross-section prisms. Use vertices/edges/faces mainly for named points, mathematical construction lines, sections, diagonals and angle overlays.
 - A composite-solid/volume question in geometry3d MUST contain solid primitives (box/cylinder/cone/sphere/extrusion), not only isolated vertices and line segments. If you cannot reconstruct the physical solids reliably, return mode="none".
@@ -1022,7 +1069,7 @@ STEP-BY-STEP PEDAGOGY — STRICT ALIGNMENT
 - Explanations must be concise and student-friendly. Put any mathematical expressions in \( ... \) transport delimiters for MathIO rendering.
 
 3D-SPECIFIC TEACHING
-- The first visual state must look recognisably like the physical solid in the question AND, when there is an uploaded isometric/orthographic drawing, the default camera must reproduce that source orientation as closely as the available evidence allows. A cloud of labelled points or a recognisable-but-differently-oriented solid is not acceptable. If the solid cannot be recognised and source-aligned from the solid primitives alone, return mode="none" rather than a misleading 3D view.
+- The first visual state must look recognisably like the physical solid in the question. For a single uploaded isometric/oblique drawing, the default camera must reproduce that source orientation as closely as the evidence allows. For a labelled orthographic_set, the 3D object must instead reproduce the TOP/FRONT/SIDE projections; use a clear exploration isometric camera and rely on the Front/Top/Side controls for verification. A cloud of labelled points or a projection-inconsistent solid is not acceptable. If the physical form cannot be reconstructed reliably, return mode="none" rather than a misleading 3D view.
 - For composite volume/surface-area questions, show the assembled solid, then visually isolate/highlight the exact component being calculated at each corrected step (base prism, cylinder, top block, etc.), then reunite/highlight the final total.
 - For a 3D angle/length question, explicitly reveal the 2D triangle or cross-section inside the solid before applying trigonometry or Pythagoras.
 - Use reveal_ids so that auxiliary diagonal/cross-section edges appear only when the matching corrected step needs them, and animate_ids so those edges visibly grow into place. Physical solid components may remain visible throughout and be dimmed when not in focus.
