@@ -1574,17 +1574,55 @@ except Exception:
 
 
 def _visual_plan_is_recommended(analysis: VisualExplanationResult | GeminiAnalysis, question_text: str = "") -> bool:
-    """Cheap local filter so ordinary algebra does not consume a second Gemini call."""
+    """Show simulations only when a diagram/graph/spatial view materially supports the maths."""
     if isinstance(analysis, VisualExplanationResult):
-        return analysis.mode != "none"
-    haystack = f"{analysis.likely_syllabus_topic} {analysis.interpreted_question} {question_text}".lower()
-    keywords = (
-        "geometry", "coordinate", "graph", "gradient", "straight line", "trigon", "bearing", "circle",
-        "triangle", "quadrilateral", "polygon", "similar", "congruent", "vector", "transformation",
-        "mensuration", "locus", "reflection", "rotation", "translation", "enlargement", "symmetry", "scale drawing",
-        "cuboid", "prism", "pyramid", "cone", "cylinder", "sphere", "3d", "three-dimensional",
+        return analysis.mode in {"geometry2d", "graph2d", "geometry3d"}
+
+    topic = str(getattr(analysis, "likely_syllabus_topic", "") or "").lower()
+    interpreted = str(getattr(analysis, "interpreted_question", "") or "").lower()
+    raw_question = str(question_text or "").lower()
+    haystack = f"{topic} {interpreted} {raw_question}"
+
+    # Strong visual cues: these topics normally benefit from a diagram, graph, coordinate plane,
+    # construction, or spatial model. Keep this list intentionally narrower than the old filter.
+    visual_keywords = (
+        "geometry", "coordinate geometry", "coordinate", "graph", "plot", "sketch",
+        "straight-line graph", "straight line graph", "gradient of the line", "intercept",
+        "triangle", "quadrilateral", "polygon", "circle", "angle", "bearing",
+        "trigonometry", "trigonometric", "angle of elevation", "angle of depression",
+        "similar triangles", "congruent", "transformation", "reflection", "rotation",
+        "translation", "enlargement", "locus", "construction", "scale drawing",
+        "mensuration", "perimeter", "area of",
+        "cuboid", "prism", "pyramid", "cone", "cylinder", "sphere", "3d",
+        "three-dimensional", "isometric", "orthographic", "top view", "front view", "side view",
+        "diagram", "figure",
     )
-    return any(token in haystack for token in keywords)
+
+    # Explicitly non-visual topics should not get a simulation merely because a generic word such
+    # as "line" or "gradient" appears in explanatory prose.
+    nonvisual_topic_keywords = (
+        "standard form", "indices", "surds", "algebraic manipulation", "factorisation",
+        "factorization", "equations and inequalities", "linear equation", "quadratic equation",
+        "simultaneous equation", "number", "ratio", "percentage", "proportion", "sets",
+        "probability", "statistics", "mean", "median", "mode", "arithmetic", "sequence",
+    )
+
+    has_visual_cue = any(token in haystack for token in visual_keywords)
+    if not has_visual_cue:
+        return False
+
+    # If the syllabus topic is clearly non-visual, require an explicit visual cue in the actual
+    # question itself (e.g. "plot the graph" or "in the diagram") before allowing a simulation.
+    topic_is_nonvisual = any(token in topic for token in nonvisual_topic_keywords)
+    question_has_explicit_visual_cue = any(token in raw_question or token in interpreted for token in (
+        "diagram", "graph", "plot", "sketch", "coordinate", "triangle", "circle", "bearing",
+        "elevation", "depression", "cuboid", "prism", "pyramid", "cone", "cylinder", "sphere",
+        "isometric", "orthographic", "top view", "front view", "side view",
+    ))
+    if topic_is_nonvisual and not question_has_explicit_visual_cue:
+        return False
+
+    return True
 
 
 def _render_source_3d_reference(plan: VisualExplanationResult, question_files: list[Any] | None) -> None:
@@ -2031,7 +2069,7 @@ def render_attempt(result: AttemptResult) -> None:
         for item in result.strengths:
             st.write(f"• {item}")
     if result.gaps:
-        st.markdown("**What to repair**")
+        st.markdown("**What to improve**")
         for item in result.gaps:
             st.write(f"• {item}")
     st.markdown("**Next hint:**")
@@ -2051,7 +2089,7 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
 
     if a.first_logic_break_step > 0:
         st.markdown(
-            f'<div class="omt-logic-break"><strong>First material logic break · Step {a.first_logic_break_step}</strong><br><span style="color:#7c4a10">Repair this point first before continuing.</span></div>',
+            f'<div class="omt-logic-break"><strong>First material logic break · Step {a.first_logic_break_step}</strong><br><span style="color:#7c4a10">Use the advice below for this point before continuing.</span></div>',
             unsafe_allow_html=True,
         )
         render_math_text(a.first_logic_break_explanation)
@@ -2072,7 +2110,7 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
         labels = {
             "correct": "Correct",
             "partly_correct": "Partly correct",
-            "incorrect": "Needs repair",
+            "incorrect": "Needs advice",
             "unclear": "Unclear",
             "unsupported": "Needs support",
         }
@@ -2110,12 +2148,12 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
                 st.caption("No specific strength was identified from the visible work.")
     with c2:
         with st.container(border=True):
-            st.markdown("### → Main repair focus")
+            st.markdown("### → Main advice focus")
             render_math_text(a.misconception_or_gap)
             st.markdown("**Check your thinking**")
             render_math_text(a.diagnostic_question)
 
-    st.markdown("### Guided repair")
+    st.markdown("### Guided advice")
     st.caption("Reveal only as much help as the student needs.")
     hint_cols = st.columns(3)
     for i, hint in enumerate(a.hint_ladder[:3], 1):
@@ -2158,7 +2196,7 @@ def render_practice_evaluation(e: PracticeEvaluation) -> None:
                 st.caption("No secure strength identified yet.")
     with right:
         with st.container(border=True):
-            st.markdown("**→ Repair next**")
+            st.markdown("**→ Advice for next step**")
             if e.missing_or_incorrect_parts:
                 st.warning("Complete: " + ", ".join(e.missing_or_incorrect_parts))
             presentation_errors = list(getattr(e, "presentation_errors", []) or [])
@@ -2501,7 +2539,7 @@ st.markdown(
     <section class="omt-hero">
       <div class="omt-eyebrow">Singapore secondary mathematics</div>
       <h1>Reasoning Tutor</h1>
-      <p>Understand the student's method, find the first reasoning break, repair it visually, then build mastery through adaptive practice.</p>
+      <p>Understand the student's method, find the first reasoning break, advise the student clearly, then build mastery through adaptive practice.</p>
       <div class="omt-chip-row">
         <span class="omt-chip">✍️ Handwriting & iPad</span>
         <span class="omt-chip">∑ MathIO equation view</span>
@@ -2919,7 +2957,7 @@ with ai_tab:
                         )
                     else:
                         st.warning(
-                            f"Stay on {kind}. The next category remains locked until this reasoning is repaired."
+                            f"Stay on {kind}. The next category remains locked until the student can apply the advice securely."
                         )
 
                     if st.button(f"Generate another {kind} question", use_container_width=True):

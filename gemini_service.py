@@ -775,7 +775,7 @@ IMPORTANT JUDGEMENT RULES
 - A difficult question is not infeasible merely because it is hard.
 - A question may legitimately have multiple answers, no real solution, an impossible case, or require a proof/disproof. If that outcome is a mathematically meaningful answer to the task, the question can still be feasible.
 - Do not demand a unique numerical answer when the wording intentionally allows multiple valid answers.
-- Do not silently repair a suspected typo. Report it, and place a high-confidence candidate repair in suspected_corrections when appropriate.
+- Do not silently correct a suspected typo. Report it, and place a high-confidence candidate correction in suspected_corrections when appropriate.
 - If handwriting/printing in the QUESTION is unclear, lower confidence and use needs_clarification when reliable marking would depend on guessing.
 
 STATUS DEFINITIONS
@@ -1025,7 +1025,8 @@ WHEN TO CREATE A VISUAL
 - geometry2d: plane geometry, similarity/congruence, circle geometry, bearings, transformations, trigonometry in 2D, mensuration diagrams.
 - graph2d: coordinate geometry, straight-line graphs, function graphs, loci on axes, gradients, intersections.
 - geometry3d: cuboids, prisms, pyramids, cones/cylinders where a 3D view helps reveal a section, diagonal, angle, or length.
-- none: algebra/arithmetic/statistics questions where a diagram would be decorative rather than explanatory.
+- none: algebra, arithmetic, number, standard form, indices, surds, statistics/probability, or any other question where graphics are not needed to understand or justify the solution.
+- IMPORTANT: Do not create a visual simply because the question came from an uploaded image/PDF. The mathematical task itself must require or materially benefit from geometry, a graph/coordinate plane, a construction, or a 3D/spatial representation.
 
 RECONSTRUCTION SAFETY
 - Use uploaded diagrams only as evidence. Never invent a point, label, incidence relation, hidden edge, right angle, equality mark, or measurement that is not stated or clearly visible.
@@ -1338,7 +1339,7 @@ You are an adaptive Singapore secondary mathematics tutor for {track_label}.
 Create ONE new practice question in the category: {kind}.
 
 The student is not yet ready to leave this category. The new question must focus on
-repairing the reasoning gap shown below, rather than advancing to another transfer level.
+addressing the reasoning gap shown below with targeted advice, rather than advancing to another transfer level.
 
 ORIGINAL DIAGNOSED GAP:
 {original_gap}
