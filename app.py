@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
+import math
 import json
 import os
 import re
@@ -11,6 +13,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
@@ -904,13 +907,247 @@ def handwriting_pad(*, key: str) -> UploadedAsset | None:
 
 
 
+
+
+def _student_table_tool(*, key_base: str) -> str:
+    """Optional fillable working table whose contents are submitted with the attempt."""
+    st.markdown("#### Working tools")
+    use_table = st.toggle(
+        "Insert a table",
+        key=f"{key_base}_use_table",
+        help="Useful for value tables, frequency tables, coordinates, sequences, and organised calculations.",
+    )
+    if not use_table:
+        return ""
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        rows = int(st.number_input("Starting rows", min_value=1, max_value=15, value=4, step=1, key=f"{key_base}_table_rows"))
+    with c2:
+        headers_text = st.text_input(
+            "Column headings",
+            value="x, y",
+            key=f"{key_base}_table_headers",
+            help="Separate headings with commas, e.g. x, y or Class interval, Frequency.",
+        )
+    headers = [h.strip() for h in headers_text.split(",") if h.strip()][:8]
+    if not headers:
+        headers = ["Column 1", "Column 2"]
+
+    seed_key = f"{key_base}_table_seed_{'|'.join(headers)}_{rows}"
+    if seed_key not in st.session_state:
+        st.session_state[seed_key] = pd.DataFrame([[""] * len(headers) for _ in range(rows)], columns=headers)
+
+    edited = st.data_editor(
+        st.session_state[seed_key],
+        key=f"{key_base}_table_editor_{hashlib.sha1(seed_key.encode()).hexdigest()[:8]}",
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        height=min(460, 78 + max(rows, 3) * 38),
+    )
+    st.caption("You can add or delete rows directly in the table. Filled cells are included when your reasoning is checked.")
+
+    if edited is None or len(edited) == 0:
+        return ""
+    clean = edited.fillna("").astype(str)
+    nonempty = clean.apply(lambda row: any(v.strip() for v in row.tolist()), axis=1)
+    clean = clean[nonempty]
+    if clean.empty:
+        return ""
+    lines = ["Student working table:", "\t".join(headers)]
+    for _, row in clean.iterrows():
+        lines.append("\t".join(str(row[h]).strip() for h in headers))
+    return "\n".join(lines)
+
+
+def _looks_like_function_or_graph_question(pq: TargetedPracticeQuestion | None) -> bool:
+    if pq is None:
+        return False
+    diagram = getattr(pq, "diagram_2d", None)
+    if diagram is not None and bool(getattr(diagram, "show_axes", False)):
+        return True
+    text = " ".join([
+        str(getattr(pq, "question", "") or ""),
+        str(getattr(pq, "focus_prompt", "") or ""),
+        str(getattr(pq, "target_skill", "") or ""),
+    ]).lower()
+    return bool(re.search(r"\b(function|graph|plot|curve|coordinate|coordinates|intercept|gradient|turning point|quadratic|linear graph)\b|f\s*\(|y\s*=", text))
+
+
+def _normalise_function_expression(expr: str) -> str:
+    value = str(expr or "").strip()
+    value = _strip_math_transport_delimiters(value)
+    value = value.replace("−", "-").replace("×", "*").replace("÷", "/").replace("^", "**")
+    value = re.sub(r"^\s*(?:y|f\s*\(\s*x\s*\))\s*=\s*", "", value, flags=re.I)
+    # Common implicit multiplication used by students: 2x, 3(x+1), x(x-2).
+    value = re.sub(r"(?<=\d)(?=x\b)", "*", value, flags=re.I)
+    value = re.sub(r"(?<=\d)(?=\()", "*", value)
+    value = re.sub(r"(?<=x)(?=\()", "*", value, flags=re.I)
+    value = re.sub(r"(?<=\))(?=(?:x|\d|\())", "*", value, flags=re.I)
+    return value
+
+
+_ALLOWED_FUNCS = {
+    "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "sqrt": math.sqrt, "exp": math.exp, "log": math.log,
+    "ln": math.log, "abs": abs,
+}
+_ALLOWED_CONSTS = {"pi": math.pi, "e": math.e}
+
+
+def _safe_eval_function(expr: str, x_value: float) -> float:
+    """Evaluate a student-entered f(x) using a tiny arithmetic AST, never Python eval()."""
+    tree = ast.parse(_normalise_function_expression(expr), mode="eval")
+
+    def walk(node):
+        if isinstance(node, ast.Expression):
+            return walk(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.Name):
+            if node.id.lower() == "x":
+                return float(x_value)
+            if node.id.lower() in _ALLOWED_CONSTS:
+                return float(_ALLOWED_CONSTS[node.id.lower()])
+            raise ValueError("Only x and standard constants are allowed.")
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            val = walk(node.operand)
+            return val if isinstance(node.op, ast.UAdd) else -val
+        if isinstance(node, ast.BinOp):
+            a, b = walk(node.left), walk(node.right)
+            if isinstance(node.op, ast.Add): return a + b
+            if isinstance(node.op, ast.Sub): return a - b
+            if isinstance(node.op, ast.Mult): return a * b
+            if isinstance(node.op, ast.Div): return a / b
+            if isinstance(node.op, ast.Pow): return a ** b
+            raise ValueError("Unsupported operator.")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            name = node.func.id.lower()
+            if name not in _ALLOWED_FUNCS or len(node.args) != 1:
+                raise ValueError("Use sin, cos, tan, sqrt, exp, log/ln, or abs with one argument.")
+            return float(_ALLOWED_FUNCS[name](walk(node.args[0])))
+        raise ValueError("Unsupported function expression.")
+
+    result = float(walk(tree))
+    if not math.isfinite(result):
+        raise ValueError("Function is not finite here.")
+    return result
+
+
+def _sample_function_scene(expr: str, *, x_min: float, x_max: float) -> dict[str, Any]:
+    samples: list[list[float]] = []
+    segments: list[list[list[float]]] = []
+    n = 420
+    dx = (x_max - x_min) / max(n - 1, 1)
+    prior_y: float | None = None
+    current: list[list[float]] = []
+    finite_ys: list[float] = []
+    for i in range(n):
+        x = x_min + i * dx
+        try:
+            y = _safe_eval_function(expr, x)
+            # Break the curve across vertical asymptotes / extreme jumps.
+            if abs(y) > 1e5 or (prior_y is not None and abs(y - prior_y) > 80):
+                raise ValueError
+            current.append([round(x, 6), round(y, 6)])
+            finite_ys.append(y)
+            prior_y = y
+        except Exception:
+            if len(current) >= 2:
+                segments.append(current)
+            current = []
+            prior_y = None
+    if len(current) >= 2:
+        segments.append(current)
+    if not segments:
+        raise ValueError("No plottable points were found in this x-range.")
+
+    if finite_ys:
+        finite_sorted = sorted(finite_ys)
+        lo = finite_sorted[max(0, int(len(finite_sorted) * .03) - 1)]
+        hi = finite_sorted[min(len(finite_sorted)-1, int(len(finite_sorted) * .97))]
+        span = max(4.0, hi - lo)
+        y_min, y_max = lo - .18 * span, hi + .18 * span
+        y_min, y_max = max(-50.0, y_min), min(50.0, y_max)
+        if y_max - y_min < 4:
+            mid=(y_min+y_max)/2; y_min=mid-2; y_max=mid+2
+    else:
+        y_min, y_max = -10.0, 10.0
+
+    polylines = [
+        {"id": f"student_function_{idx}", "points": pts, "label": "", "dashed": False}
+        for idx, pts in enumerate(segments)
+    ]
+    return {
+        "x_min": float(x_min), "x_max": float(x_max),
+        "y_min": float(y_min), "y_max": float(y_max),
+        "show_axes": True, "keep_aspect": False,
+        "points": [], "segments": [], "polylines": polylines, "circles": [], "angles": [],
+    }
+
+
+def _render_function_graph_tool(pq: TargetedPracticeQuestion | None, *, key_base: str) -> None:
+    if not _looks_like_function_or_graph_question(pq):
+        return
+    st.markdown("#### Function / graph tool")
+    show_graph = st.toggle(
+        "Show graph of a function",
+        key=f"{key_base}_show_function_graph",
+        help="Enter a function of x, then explore it with the same plotting and geometry tools.",
+    )
+    if not show_graph:
+        return
+    c1, c2, c3 = st.columns([2.2, .8, .8])
+    with c1:
+        expr = st.text_input(
+            "Function",
+            key=f"{key_base}_function_expr",
+            placeholder="e.g. y = x^2 - 4x + 3",
+            help="Use x, +, −, ×, ÷, powers (^), brackets, and sin/cos/tan/sqrt/log if needed.",
+        )
+    with c2:
+        x_min = float(st.number_input("x min", value=-10.0, step=1.0, key=f"{key_base}_function_xmin"))
+    with c3:
+        x_max = float(st.number_input("x max", value=10.0, step=1.0, key=f"{key_base}_function_xmax"))
+    if not expr.strip():
+        st.caption("Enter the function you want to plot.")
+        return
+    if x_max <= x_min:
+        st.warning("x max must be greater than x min.")
+        return
+    try:
+        scene = _sample_function_scene(expr, x_min=x_min, x_max=x_max)
+    except Exception as exc:
+        st.warning(f"The function could not be plotted: {exc}")
+        return
+    if _practice_diagram_component is None:
+        st.info("The interactive graph component is unavailable in this browser session.")
+        return
+    _practice_diagram_component(
+        data={
+            "scene": scene,
+            "step": {"highlight_ids": [], "dim_ids": [], "animate_ids": []},
+            "visible_ids": [], "animate_ids": [], "reveal_mode": False, "animation_nonce": 0,
+        },
+        default={},
+        key=f"{key_base}_function_graph",
+        width="stretch",
+        height="content",
+    )
+    st.caption("Use Point, Line, Segment, Angle, Distance and the other graph tools to explore the function. This graph is a working aid and does not reveal the answer automatically.")
+
+
 def targeted_practice_input(
     label: str,
     *,
     key_base: str,
     height: int = 150,
+    practice_question: TargetedPracticeQuestion | None = None,
 ) -> tuple[str, str, str, list[UploadedAsset]]:
     """Collect targeted-practice working from equation editor, text, or iPad handwriting."""
+    _render_function_graph_tool(practice_question, key_base=key_base)
+    table_text = _student_table_tool(key_base=key_base)
     mode = st.radio(
         "Working input method",
         ["Equation editor", "Handwrite on iPad", "Text working"],
@@ -935,7 +1172,13 @@ def targeted_practice_input(
         working_lines = [f"Step {i}: \\({line}\\)" for i, line in enumerate(used_latex, 1)]
         if explanation.strip():
             working_lines.append(f"Student explanation: {explanation.strip()}")
-        return "\n".join(working_lines), mode, "\n".join(used_ascii), []
+        main_text = "\n".join(working_lines)
+        if table_text:
+            main_text = (main_text + "\n\n" + table_text).strip()
+        offline = "\n".join(used_ascii)
+        if table_text:
+            offline = (offline + "\n\n" + table_text).strip()
+        return main_text, mode, offline, []
 
     if mode == "Text working":
         value = st.text_area(
@@ -944,7 +1187,10 @@ def targeted_practice_input(
             height=height,
             placeholder="Show all parts and important reasoning steps, not only the final answer.",
         )
-        return value, mode, value, []
+        main_text = value.strip()
+        if table_text:
+            main_text = (main_text + "\n\n" + table_text).strip()
+        return main_text, mode, main_text, []
 
     st.caption(
         "On iPad, write directly with Apple Pencil/finger. The pad no longer submits after every stroke. "
@@ -989,7 +1235,9 @@ def targeted_practice_input(
         assets = []
 
     text = explanation.strip()
-    return text, "Handwritten working", "", assets
+    if table_text:
+        text = (text + "\n\n" + table_text).strip()
+    return text, "Handwritten working", table_text, assets
 
 
 # Interactive visual explanations. The model supplies only declarative primitives;
@@ -3172,6 +3420,7 @@ with ai_tab:
                 f"Student working for {kind}",
                 key_base=working_key,
                 height=150,
+                practice_question=pq,
             )
 
             if st.button(f"Check {kind} reasoning", key=f"ai_practice_check_{stage_index}_{st.session_state.ai_practice_question_version}", type="primary"):
