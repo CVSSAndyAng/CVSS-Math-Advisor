@@ -126,6 +126,134 @@ class QuestionFeasibilityResult(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
+class VisualPoint2D(BaseModel):
+    id: str = Field(description="Unique primitive id used by step highlighting")
+    x: float
+    y: float
+    label: str = ""
+
+
+class VisualSegment2D(BaseModel):
+    id: str
+    start: str = Field(description="Point id")
+    end: str = Field(description="Point id")
+    label: str = ""
+    dashed: bool = False
+
+
+class VisualPolyline2D(BaseModel):
+    id: str
+    points: list[list[float]] = Field(
+        description="Ordered [x,y] samples. Use this for graph curves or auxiliary paths; never return executable expressions."
+    )
+    label: str = ""
+    dashed: bool = False
+
+
+class VisualCircle2D(BaseModel):
+    id: str
+    center_x: float
+    center_y: float
+    radius: float = Field(gt=0)
+    label: str = ""
+
+
+class VisualAngle2D(BaseModel):
+    id: str
+    arm1: str = Field(description="Point id on first ray")
+    vertex: str = Field(description="Vertex point id")
+    arm2: str = Field(description="Point id on second ray")
+    label: str = ""
+
+
+class VisualScene2D(BaseModel):
+    x_min: float = -5
+    x_max: float = 5
+    y_min: float = -5
+    y_max: float = 5
+    show_axes: bool = False
+    keep_aspect: bool = True
+    points: list[VisualPoint2D] = Field(default_factory=list)
+    segments: list[VisualSegment2D] = Field(default_factory=list)
+    polylines: list[VisualPolyline2D] = Field(default_factory=list)
+    circles: list[VisualCircle2D] = Field(default_factory=list)
+    angles: list[VisualAngle2D] = Field(default_factory=list)
+
+
+class VisualVertex3D(BaseModel):
+    id: str
+    x: float
+    y: float
+    z: float
+    label: str = ""
+
+
+class VisualEdge3D(BaseModel):
+    id: str
+    start: str = Field(description="Vertex id")
+    end: str = Field(description="Vertex id")
+    label: str = ""
+    dashed: bool = False
+
+
+class VisualFace3D(BaseModel):
+    id: str
+    vertices: list[str] = Field(min_length=3, description="Vertex ids in boundary order")
+    label: str = ""
+
+
+class VisualAngle3D(BaseModel):
+    id: str
+    arm1: str = Field(description="Vertex id on first ray")
+    vertex: str = Field(description="Vertex id at the angle")
+    arm2: str = Field(description="Vertex id on second ray")
+    label: str = ""
+
+
+class VisualScene3D(BaseModel):
+    vertices: list[VisualVertex3D] = Field(default_factory=list)
+    edges: list[VisualEdge3D] = Field(default_factory=list)
+    faces: list[VisualFace3D] = Field(default_factory=list)
+    angles: list[VisualAngle3D] = Field(default_factory=list)
+
+
+class VisualExplanationStep(BaseModel):
+    title: str
+    explanation: str = Field(description="Concise student-facing explanation for this visual step")
+    math: list[str] = Field(
+        default_factory=list,
+        description=r"MathIO-ready raw LaTeX equations for this step, with no dollar-sign or \( \) delimiters",
+    )
+    highlight_ids: list[str] = Field(
+        default_factory=list,
+        description="Primitive ids to emphasize in the visual at this step",
+    )
+    dim_ids: list[str] = Field(
+        default_factory=list,
+        description="Primitive ids to de-emphasize so the important geometry is easier to see",
+    )
+    camera_position: list[float] = Field(
+        default_factory=list,
+        description="For 3D only: optional [x,y,z] camera position",
+    )
+    camera_target: list[float] = Field(
+        default_factory=list,
+        description="For 3D only: optional [x,y,z] orbit target",
+    )
+
+
+class VisualExplanationResult(BaseModel):
+    mode: Literal["none", "geometry2d", "graph2d", "geometry3d"]
+    title: str
+    reconstruction_confidence: Literal["high", "medium", "low"]
+    reconstruction_note: str = Field(
+        description="State what was reconstructed from the question and whether the drawing is schematic/not to scale."
+    )
+    steps: list[VisualExplanationStep] = Field(default_factory=list)
+    scene_2d: VisualScene2D | None = None
+    scene_3d: VisualScene3D | None = None
+
+
 class ReasoningStep(BaseModel):
     line_number: int = Field(description="1-based step number in the student's visible working")
     student_step: str = Field(
@@ -555,6 +683,157 @@ Keep explanations concise and student/teacher friendly.
         result.status = "needs_clarification"
     return result
 
+
+
+def _sanitize_visual_explanation(result: VisualExplanationResult) -> VisualExplanationResult:
+    """Keep visual plans safe and internally consistent before the browser renderer sees them."""
+    if not result.steps or result.reconstruction_confidence == "low":
+        result.mode = "none"
+        result.scene_2d = None
+        result.scene_3d = None
+        return result
+
+    valid_ids: set[str] = set()
+    if result.mode in {"geometry2d", "graph2d"}:
+        if result.scene_2d is None:
+            result.mode = "none"
+            return result
+        scene = result.scene_2d
+        if scene.x_min >= scene.x_max:
+            scene.x_min, scene.x_max = -5, 5
+        if scene.y_min >= scene.y_max:
+            scene.y_min, scene.y_max = -5, 5
+        valid_ids.update(p.id for p in scene.points)
+        valid_ids.update(x.id for x in scene.segments)
+        valid_ids.update(x.id for x in scene.polylines)
+        valid_ids.update(x.id for x in scene.circles)
+        valid_ids.update(x.id for x in scene.angles)
+    elif result.mode == "geometry3d":
+        if result.scene_3d is None:
+            result.mode = "none"
+            return result
+        scene = result.scene_3d
+        valid_ids.update(x.id for x in scene.vertices)
+        valid_ids.update(x.id for x in scene.edges)
+        valid_ids.update(x.id for x in scene.faces)
+        valid_ids.update(x.id for x in scene.angles)
+    else:
+        result.scene_2d = None
+        result.scene_3d = None
+        return result
+
+    for step in result.steps:
+        step.highlight_ids = [item for item in step.highlight_ids if item in valid_ids]
+        step.dim_ids = [item for item in step.dim_ids if item in valid_ids and item not in step.highlight_ids]
+        if len(step.camera_position) not in {0, 3}:
+            step.camera_position = []
+        if len(step.camera_target) not in {0, 3}:
+            step.camera_target = []
+    return result
+
+
+def generate_visual_explanation(
+    *,
+    track_label: str,
+    question_text: str,
+    analysis: GeminiAnalysis,
+    question_assets: list[UploadedAsset] | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+) -> VisualExplanationResult:
+    """Build a constrained 2D/3D visual teaching plan for geometry/graph questions.
+
+    Gemini supplies only declarative geometry primitives. It never supplies JavaScript or executable
+    graph expressions; the Streamlit frontend owns all rendering logic.
+    """
+    question_assets = question_assets or []
+    context = {
+        "interpreted_question": analysis.interpreted_question,
+        "likely_syllabus_topic": analysis.likely_syllabus_topic,
+        "first_logic_break_step": analysis.first_logic_break_step,
+        "first_logic_break_explanation": analysis.first_logic_break_explanation,
+        "misconception_or_gap": analysis.misconception_or_gap,
+        "corrected_path": analysis.corrected_path,
+        "final_answer": analysis.final_answer,
+    }
+    prompt = rf"""
+You are creating a STEP-BY-STEP VISUAL EXPLANATION for a Singapore secondary mathematics student studying {track_label}.
+The question has already passed a separate feasibility check. Your task is to decide whether an interactive visual will materially improve understanding.
+
+SELECTED QUESTION:
+{question_text.strip() or analysis.interpreted_question}
+
+VERIFIED TUTOR ANALYSIS CONTEXT:
+{context}
+
+WHEN TO CREATE A VISUAL
+- geometry2d: plane geometry, similarity/congruence, circle geometry, bearings, transformations, trigonometry in 2D, mensuration diagrams.
+- graph2d: coordinate geometry, straight-line graphs, function graphs, loci on axes, gradients, intersections.
+- geometry3d: cuboids, prisms, pyramids, cones/cylinders where a 3D view helps reveal a section, diagonal, angle, or length.
+- none: algebra/arithmetic/statistics questions where a diagram would be decorative rather than explanatory.
+
+RECONSTRUCTION SAFETY
+- Use uploaded diagrams only as evidence. Never invent a point, label, incidence relation, hidden edge, right angle, equality mark, or measurement that is not stated or clearly visible.
+- If the diagram is cropped, ambiguous, or too unclear to reconstruct reliably, return mode="none" and explain why in reconstruction_note.
+- If reconstruction confidence would be low, return mode="none". A polished but wrong diagram is worse than no diagram.
+- A schematic geometry drawing may use convenient coordinates that are NOT to scale, provided incidences and stated relationships are preserved. Say this in reconstruction_note.
+- For coordinate graphs, use the actual coordinates/scales from the question where known.
+- For 3D solids, choose a simple internally consistent coordinate model that preserves the named vertices/edges/faces and stated lengths/angles. Do not imply unstated lengths are exact.
+
+VISUAL DATA RULES
+- Return ONLY declarative primitives from the schema. Do not return HTML, JavaScript, executable expressions, URLs, or code.
+- Primitive ids must be unique and short, for example A, AB, angleABC, faceABCD, baseDiagonal.
+- Every start/end/vertex reference must point to an existing point/vertex id.
+- For graph curves use VisualPolyline2D.points as numeric [x,y] samples. Never return an executable function string.
+- Keep scenes modest: usually <= 20 points/vertices and <= 35 other primitives.
+- In 3D include visible structural edges. Include faces only when they help orient the student.
+
+STEP-BY-STEP PEDAGOGY
+- Provide 3 to 7 steps.
+- Each step should reveal ONE idea: identify the target, isolate the relevant triangle/line/region, choose the relationship, substitute, calculate, verify.
+- highlight_ids must name the visual primitives central to that step.
+- dim_ids may de-emphasize irrelevant edges/faces so the relevant 2D cross-section becomes obvious.
+- For 3D, use camera_position/camera_target only when a viewpoint materially clarifies the step.
+- When the student's original reasoning chose the wrong angle/side/coordinate pairing, the first useful step may contrast the relevant objects, but do not shame the student.
+- math entries must be MathIO-ready raw LaTeX with no delimiters. Use textbook fractions, roots, indices and trig notation.
+- Explanations must be concise and student-friendly.
+
+3D-SPECIFIC TEACHING
+- For a 3D angle/length question, explicitly reveal the 2D triangle or cross-section inside the solid before applying trigonometry or Pythagoras.
+- Use dim_ids to fade unrelated edges and highlight the exact edges forming that triangle.
+- If a space diagonal is needed, show how it is obtained from a face/base diagonal first when appropriate.
+
+Return a useful visual only when it is mathematically justified by the question.
+""".strip()
+
+    interaction_input: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for index, asset in enumerate(question_assets, 1):
+        interaction_input.append({"type": "text", "text": f"Question visual source {index}: {asset.name}"})
+        interaction_input.append(_encode_asset(asset))
+
+    active_client = client or _make_client(api_key)
+    try:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=interaction_input,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": VisualExplanationResult.model_json_schema(),
+            },
+        )
+        result = VisualExplanationResult.model_validate_json(interaction.output_text)
+    except ValidationError as exc:
+        raise GeminiTutorError(
+            "Gemini could not create a reliable visual explanation for this question. The normal reasoning feedback is still available.",
+            category="format",
+        ) from exc
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
+
+    return _sanitize_visual_explanation(result)
 
 def _validate_practice_question_completeness(question: TargetedPracticeQuestion) -> None:
     """Reject practice items whose reference material does not cover all required parts."""

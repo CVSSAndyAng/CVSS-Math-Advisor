@@ -20,12 +20,14 @@ from gemini_service import (
     QuestionDetectionResult,
     QuestionFeasibilityResult,
     TargetedPracticeQuestion,
+    VisualExplanationResult,
     UploadedAsset,
     analyze_submission,
     assess_question_feasibility,
     detect_questions_in_assets,
     evaluate_practice_attempt,
     generate_followup_practice_question,
+    generate_visual_explanation,
     get_api_key,
     required_parts_for_question,
 )
@@ -602,6 +604,328 @@ def targeted_practice_input(
     text = explanation.strip()
     return text, "Handwritten working", "", assets
 
+
+# Interactive visual explanations. The model supplies only declarative primitives;
+# JavaScript rendering is owned by the app so uploaded/model content cannot execute code.
+JSXGRAPH_VERSION = "2.4.0"
+THREE_VERSION = "0.185.0"  # three.js r185
+
+_VISUAL_2D_HTML = """
+<div class="omt-visual2d-shell">
+  <div class="omt-visual2d-board"></div>
+  <div class="omt-visual-help">Drag to pan. Use the mouse wheel/trackpad to zoom where supported.</div>
+</div>
+"""
+
+_VISUAL_2D_CSS = """
+.omt-visual2d-shell { width: 100%; }
+.omt-visual2d-board { width: 100%; height: min(62vw, 520px); min-height: 360px; border: 1px solid rgba(128,128,128,.28); border-radius: .75rem; overflow: hidden; background: #ffffff; touch-action: none; }
+.omt-visual-help { margin-top: .35rem; font-size: .78rem; opacity: .68; }
+@media (max-width: 640px) { .omt-visual2d-board { height: 420px; min-height: 340px; } }
+"""
+
+_VISUAL_2D_JS = r"""
+const JXG_URL = 'https://cdn.jsdelivr.net/npm/jsxgraph@2.4.0/distrib/jsxgraphcore.mjs';
+
+async function loadJXG() {
+  if (!globalThis.__omtJXGPromise) globalThis.__omtJXGPromise = import(JXG_URL);
+  const mod = await globalThis.__omtJXGPromise;
+  return mod.default || mod.JXG || mod;
+}
+
+function styleFor(id, highlight, dim, kind='line') {
+  const hi = highlight.has(id);
+  const low = dim.has(id);
+  if (kind === 'point') {
+    return { strokeColor: hi ? '#dc2626' : (low ? '#cbd5e1' : '#0f172a'), fillColor: hi ? '#dc2626' : (low ? '#e2e8f0' : '#0f172a'), opacity: low ? 0.35 : 1, size: hi ? 5 : 3.5 };
+  }
+  return { strokeColor: hi ? '#dc2626' : (low ? '#cbd5e1' : '#475569'), strokeWidth: hi ? 4 : 2.2, opacity: low ? 0.28 : 0.95 };
+}
+
+export default async function(component) {
+  const { parentElement, data } = component;
+  const stage = parentElement.querySelector('.omt-visual2d-board');
+  const scene = data?.scene || {};
+  const step = data?.step || {};
+  const highlight = new Set(step.highlight_ids || []);
+  const dim = new Set(step.dim_ids || []);
+  let JXG;
+  try { JXG = await loadJXG(); } catch (err) { stage.textContent = 'Interactive 2D visual could not load.'; return; }
+
+  try { if (parentElement.__omtBoard) JXG.JSXGraph.freeBoard(parentElement.__omtBoard); } catch (_) {}
+  stage.replaceChildren();
+  stage.id = `omt-jxg-${Math.random().toString(36).slice(2)}`;
+  const xMin = Number(scene.x_min ?? -5), xMax = Number(scene.x_max ?? 5);
+  const yMin = Number(scene.y_min ?? -5), yMax = Number(scene.y_max ?? 5);
+  const board = JXG.JSXGraph.initBoard(stage.id, {
+    boundingbox: [xMin, yMax, xMax, yMin],
+    axis: Boolean(scene.show_axes),
+    keepaspectratio: scene.keep_aspect !== false,
+    showNavigation: false,
+    showCopyright: false,
+    pan: { enabled: true, needShift: false },
+    zoom: { wheel: true, needShift: false, factorX: 1.2, factorY: 1.2 },
+  });
+  parentElement.__omtBoard = board;
+
+  const pts = new Map();
+  for (const p of (scene.points || [])) {
+    const st = styleFor(p.id, highlight, dim, 'point');
+    const obj = board.create('point', [Number(p.x), Number(p.y)], {
+      name: p.label || '', fixed: true, highlight: false, withLabel: Boolean(p.label),
+      strokeColor: st.strokeColor, fillColor: st.fillColor, opacity: st.opacity, size: st.size,
+      label: { fontSize: 14, offset: [7, 7] },
+    });
+    pts.set(p.id, obj);
+  }
+
+  for (const seg of (scene.segments || [])) {
+    const a = pts.get(seg.start), b = pts.get(seg.end); if (!a || !b) continue;
+    const st = styleFor(seg.id, highlight, dim);
+    board.create('segment', [a,b], {
+      name: seg.label || '', withLabel: Boolean(seg.label), fixed: true, highlight: false,
+      strokeColor: st.strokeColor, strokeWidth: st.strokeWidth, opacity: st.opacity,
+      dash: seg.dashed ? 2 : 0, label: { fontSize: 13 },
+    });
+  }
+
+  for (const poly of (scene.polylines || [])) {
+    const samples = Array.isArray(poly.points) ? poly.points.filter(v => Array.isArray(v) && v.length >= 2) : [];
+    if (samples.length < 2) continue;
+    const st = styleFor(poly.id, highlight, dim);
+    const xs = samples.map(v => Number(v[0])), ys = samples.map(v => Number(v[1]));
+    board.create('curve', [xs, ys], { fixed: true, highlight: false, strokeColor: st.strokeColor, strokeWidth: st.strokeWidth, opacity: st.opacity, dash: poly.dashed ? 2 : 0 });
+    if (poly.label) {
+      const m = samples[Math.floor(samples.length/2)];
+      board.create('text', [Number(m[0]), Number(m[1]), poly.label], { fixed:true, fontSize:13, color: st.strokeColor });
+    }
+  }
+
+  for (const c of (scene.circles || [])) {
+    const st = styleFor(c.id, highlight, dim);
+    const circle = board.create('circle', [[Number(c.center_x), Number(c.center_y)], Number(c.radius)], {
+      fixed:true, highlight:false, strokeColor: st.strokeColor, strokeWidth: st.strokeWidth, opacity: st.opacity,
+      fillOpacity: 0, name: c.label || '', withLabel: Boolean(c.label),
+    });
+  }
+
+  for (const ang of (scene.angles || [])) {
+    const a = pts.get(ang.arm1), v = pts.get(ang.vertex), c = pts.get(ang.arm2); if (!a || !v || !c) continue;
+    const st = styleFor(ang.id, highlight, dim);
+    board.create('angle', [a,v,c], {
+      name: ang.label || '', withLabel: Boolean(ang.label), fixed:true, highlight:false,
+      strokeColor: st.strokeColor, fillColor: st.strokeColor, fillOpacity: highlight.has(ang.id) ? 0.16 : 0.06,
+      strokeWidth: st.strokeWidth, radius: 0.55, label: { fontSize: 13 },
+    });
+  }
+  board.update();
+}
+"""
+
+_VISUAL_3D_HTML = """
+<div class="omt-visual3d-shell">
+  <div class="omt-visual3d-stage"></div>
+  <div class="omt-visual-help">Drag with one finger to rotate. Pinch with two fingers to zoom. The highlighted edges/angles are the ones used in this step.</div>
+</div>
+"""
+
+_VISUAL_3D_CSS = """
+.omt-visual3d-shell { width: 100%; }
+.omt-visual3d-stage { width: 100%; height: min(64vw, 540px); min-height: 390px; border: 1px solid rgba(128,128,128,.28); border-radius: .75rem; overflow: hidden; background: linear-gradient(#f8fafc,#ffffff); touch-action: none; position: relative; }
+.omt-visual3d-stage canvas { display:block; width:100%; height:100%; }
+.omt-visual-help { margin-top:.35rem; font-size:.78rem; opacity:.68; }
+@media (max-width: 640px) { .omt-visual3d-stage { height: 450px; min-height: 390px; } }
+"""
+
+_VISUAL_3D_JS = r"""
+const THREE_URL = 'https://esm.sh/three@0.185.0';
+const ORBIT_URL = 'https://esm.sh/three@0.185.0/examples/jsm/controls/OrbitControls.js';
+
+async function loadThree() {
+  if (!globalThis.__omtThreePromise) globalThis.__omtThreePromise = Promise.all([import(THREE_URL), import(ORBIT_URL)]);
+  const [THREE, controls] = await globalThis.__omtThreePromise;
+  return { THREE, OrbitControls: controls.OrbitControls };
+}
+
+function textSprite(THREE, text, color='#0f172a') {
+  if (!text) return null;
+  const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 128;
+  const ctx = canvas.getContext('2d'); ctx.clearRect(0,0,512,128); ctx.font = '52px system-ui, sans-serif'; ctx.fillStyle=color; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(text,256,64);
+  const texture = new THREE.CanvasTexture(canvas); texture.minFilter = THREE.LinearFilter;
+  const material = new THREE.SpriteMaterial({ map:texture, transparent:true, depthTest:false });
+  const sprite = new THREE.Sprite(material); sprite.scale.set(1.6,0.4,1); sprite.userData.__texture = texture; return sprite;
+}
+
+function edgeMaterial(THREE, id, highlight, dim, dashed=false) {
+  const hi=highlight.has(id), low=dim.has(id); const color=hi?0xdc2626:(low?0xcbd5e1:0x334155); const opacity=low?0.22:0.95;
+  if (dashed) return new THREE.LineDashedMaterial({ color, transparent:true, opacity, dashSize:.18, gapSize:.1, linewidth: hi?3:1 });
+  return new THREE.LineBasicMaterial({ color, transparent:true, opacity, linewidth: hi?3:1 });
+}
+
+export default async function(component) {
+  const { parentElement, data } = component;
+  const stage = parentElement.querySelector('.omt-visual3d-stage');
+  const sceneData = data?.scene || {}, step = data?.step || {};
+  const highlight = new Set(step.highlight_ids || []), dim = new Set(step.dim_ids || []);
+  if (parentElement.__omtThreeCleanup) parentElement.__omtThreeCleanup();
+  stage.replaceChildren();
+
+  let THREE, OrbitControls;
+  try { ({THREE, OrbitControls} = await loadThree()); } catch (err) { stage.textContent='Interactive 3D visual could not load.'; return; }
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 1000);
+  const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0xffffff, 0);
+  stage.appendChild(renderer.domElement);
+  const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping=true; controls.dampingFactor=.08; controls.enablePan=true;
+
+  const vertices = new Map(); const coords = [];
+  for (const v of (sceneData.vertices || [])) {
+    const pos = new THREE.Vector3(Number(v.x),Number(v.y),Number(v.z)); coords.push(pos); vertices.set(v.id,pos);
+    const hi=highlight.has(v.id), low=dim.has(v.id);
+    const geom=new THREE.SphereGeometry(hi ? .09 : .07,18,12);
+    const mat=new THREE.MeshBasicMaterial({color:hi?0xdc2626:(low?0xcbd5e1:0x0f172a),transparent:true,opacity:low ? .28 : 1});
+    const mesh=new THREE.Mesh(geom,mat); mesh.position.copy(pos); scene.add(mesh);
+    const label=textSprite(THREE,v.label||v.id,hi?'#dc2626':'#0f172a'); if(label){ label.position.copy(pos).add(new THREE.Vector3(.12,.16,.08)); scene.add(label); }
+  }
+
+  for (const e of (sceneData.edges || [])) {
+    const a=vertices.get(e.start), b=vertices.get(e.end); if(!a||!b) continue;
+    const geom=new THREE.BufferGeometry().setFromPoints([a,b]); const mat=edgeMaterial(THREE,e.id,highlight,dim,Boolean(e.dashed));
+    const line=new THREE.Line(geom,mat); if(e.dashed) line.computeLineDistances(); scene.add(line);
+    if(e.label){ const m=a.clone().add(b).multiplyScalar(.5); const sp=textSprite(THREE,e.label,highlight.has(e.id)?'#dc2626':'#334155'); if(sp){sp.position.copy(m).add(new THREE.Vector3(.08,.08,.08)); scene.add(sp);} }
+  }
+
+  for (const f of (sceneData.faces || [])) {
+    const vv=(f.vertices||[]).map(id=>vertices.get(id)).filter(Boolean); if(vv.length<3) continue;
+    const arr=[]; for(let i=1;i<vv.length-1;i++){ for(const p of [vv[0],vv[i],vv[i+1]]) arr.push(p.x,p.y,p.z); }
+    const geom=new THREE.BufferGeometry(); geom.setAttribute('position',new THREE.Float32BufferAttribute(arr,3)); geom.computeVertexNormals();
+    const hi=highlight.has(f.id), low=dim.has(f.id); const mat=new THREE.MeshBasicMaterial({color:hi?0xfca5a5:0x94a3b8,transparent:true,opacity:low ? .025 : (hi ? .16 : .055),side:THREE.DoubleSide,depthWrite:false});
+    scene.add(new THREE.Mesh(geom,mat));
+  }
+
+  for (const aDef of (sceneData.angles || [])) {
+    const pa=vertices.get(aDef.arm1), pv=vertices.get(aDef.vertex), pc=vertices.get(aDef.arm2); if(!pa||!pv||!pc) continue;
+    const u=pa.clone().sub(pv).normalize(), w=pc.clone().sub(pv).normalize(); const dot=THREE.MathUtils.clamp(u.dot(w),-1,1); const theta=Math.acos(dot); const sin=Math.sin(theta); if(theta<.02||Math.abs(sin)<1e-4) continue;
+    const tangent=w.clone().sub(u.clone().multiplyScalar(dot)).normalize(); const radius=.34; const samples=[];
+    for(let i=0;i<=28;i++){ const t=theta*i/28; samples.push(pv.clone().add(u.clone().multiplyScalar(Math.cos(t)*radius)).add(tangent.clone().multiplyScalar(Math.sin(t)*radius))); }
+    const geom=new THREE.BufferGeometry().setFromPoints(samples); const mat=edgeMaterial(THREE,aDef.id,highlight,dim,false); scene.add(new THREE.Line(geom,mat));
+    if(aDef.label){ const mid=samples[Math.floor(samples.length/2)]; const sp=textSprite(THREE,aDef.label,highlight.has(aDef.id)?'#dc2626':'#334155'); if(sp){sp.position.copy(mid);scene.add(sp);} }
+  }
+
+  let center=new THREE.Vector3(0,0,0), radius=2;
+  if(coords.length){ const box=new THREE.Box3().setFromPoints(coords); center=box.getCenter(new THREE.Vector3()); radius=Math.max(box.getSize(new THREE.Vector3()).length()*.72,1.4); }
+  const cp=Array.isArray(step.camera_position)&&step.camera_position.length===3?step.camera_position:null;
+  const ct=Array.isArray(step.camera_target)&&step.camera_target.length===3?step.camera_target:null;
+  camera.position.set(...(cp?cp:[center.x+radius*1.35,center.y+radius*.9,center.z+radius*1.35]));
+  controls.target.set(...(ct?ct:[center.x,center.y,center.z])); camera.lookAt(controls.target); controls.update();
+
+  const resize=()=>{ const w=Math.max(stage.clientWidth,320), h=Math.max(stage.clientHeight,360); renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix(); };
+  resize(); const ro=new ResizeObserver(resize); ro.observe(stage);
+  let raf=0; const animate=()=>{ raf=requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); }; animate();
+  parentElement.__omtThreeCleanup=()=>{ cancelAnimationFrame(raf); ro.disconnect(); controls.dispose(); scene.traverse(o=>{o.geometry?.dispose?.(); if(o.material){const mats=Array.isArray(o.material)?o.material:[o.material]; for(const m of mats){m.map?.dispose?.();m.dispose?.();}}}); renderer.dispose(); renderer.domElement.remove(); };
+}
+"""
+
+try:
+    _visual_2d_component = st.components.v2.component(
+        "omt_visual_explanation_2d",
+        html=_VISUAL_2D_HTML,
+        css=_VISUAL_2D_CSS,
+        js=_VISUAL_2D_JS,
+        isolate_styles=False,
+    )
+except Exception:
+    _visual_2d_component = None
+
+try:
+    _visual_3d_component = st.components.v2.component(
+        "omt_visual_explanation_3d",
+        html=_VISUAL_3D_HTML,
+        css=_VISUAL_3D_CSS,
+        js=_VISUAL_3D_JS,
+        isolate_styles=False,
+    )
+except Exception:
+    _visual_3d_component = None
+
+
+def _visual_plan_is_recommended(analysis: VisualExplanationResult | GeminiAnalysis, question_text: str = "") -> bool:
+    """Cheap local filter so ordinary algebra does not consume a second Gemini call."""
+    if isinstance(analysis, VisualExplanationResult):
+        return analysis.mode != "none"
+    haystack = f"{analysis.likely_syllabus_topic} {analysis.interpreted_question} {question_text}".lower()
+    keywords = (
+        "geometry", "coordinate", "graph", "gradient", "straight line", "trigon", "bearing", "circle",
+        "triangle", "quadrilateral", "polygon", "similar", "congruent", "vector", "transformation",
+        "mensuration", "locus", "reflection", "rotation", "translation", "enlargement", "symmetry", "scale drawing",
+        "cuboid", "prism", "pyramid", "cone", "cylinder", "sphere", "3d", "three-dimensional",
+    )
+    return any(token in haystack for token in keywords)
+
+
+def render_visual_explanation(plan: VisualExplanationResult) -> None:
+    if plan.mode == "none":
+        if plan.reconstruction_note:
+            st.info("A reliable interactive reconstruction was not generated: " + plan.reconstruction_note)
+        return
+    if not plan.steps:
+        return
+
+    st.markdown("### Visual step-by-step explanation")
+    st.caption(
+        f"Reconstruction confidence: {plan.reconstruction_confidence.title()}. {plan.reconstruction_note}"
+    )
+    max_index = len(plan.steps) - 1
+    idx = max(0, min(int(st.session_state.get("ai_visual_step", 0)), max_index))
+    st.session_state.ai_visual_step = idx
+
+    b1, mid, b2 = st.columns([1, 2.1, 1])
+    if b1.button("← Previous", disabled=idx <= 0, use_container_width=True, key="ai_visual_prev"):
+        st.session_state.ai_visual_step = max(0, idx - 1)
+        st.rerun()
+    mid.markdown(f"<div style='text-align:center;padding:.55rem'><strong>Step {idx + 1} of {len(plan.steps)}</strong></div>", unsafe_allow_html=True)
+    if b2.button("Next →", disabled=idx >= max_index, use_container_width=True, key="ai_visual_next"):
+        st.session_state.ai_visual_step = min(max_index, idx + 1)
+        st.rerun()
+
+    step = plan.steps[idx]
+    scene_payload: dict[str, Any] | None = None
+    if plan.mode in {"geometry2d", "graph2d"} and plan.scene_2d is not None:
+        scene_payload = plan.scene_2d.model_dump()
+        if _visual_2d_component is not None:
+            _visual_2d_component(
+                data={"scene": scene_payload, "step": step.model_dump()},
+                default={},
+                key="ai_visual2d",
+                width="stretch",
+                height="content",
+            )
+        else:
+            st.info("The interactive 2D renderer is unavailable in this browser session.")
+    elif plan.mode == "geometry3d" and plan.scene_3d is not None:
+        scene_payload = plan.scene_3d.model_dump()
+        if _visual_3d_component is not None:
+            _visual_3d_component(
+                data={"scene": scene_payload, "step": step.model_dump()},
+                default={},
+                key="ai_visual3d",
+                width="stretch",
+                height="content",
+            )
+        else:
+            st.info("The interactive 3D renderer is unavailable in this browser session.")
+
+    st.markdown(f"#### {step.title}")
+    render_math_text(step.explanation)
+    for formula in step.math:
+        render_mathio(formula)
+
+    if plan.mode == "geometry3d":
+        st.caption("iPad: drag with one finger to rotate the solid and pinch with two fingers to zoom. The simulation is explanatory and follows the stated geometry; it is not assumed to be drawn to scale unless the question says so.")
+
 def init_state() -> None:
     defaults: dict[str, Any] = {
         "session_id": secrets.token_hex(8),
@@ -613,6 +937,9 @@ def init_state() -> None:
         "seed_counter": 1,
         "ai_analysis": None,
         "ai_error": "",
+        "ai_visual_explanation": None,
+        "ai_visual_error": "",
+        "ai_visual_step": 0,
         "ai_fallback_result": None,
         "ai_question_detection": None,
         "ai_question_detection_error": "",
@@ -1236,6 +1563,9 @@ with ai_tab:
         st.session_state.ai_question_feasibility_error = ""
         st.session_state.ai_question_feasibility_signature = ""
         st.session_state.ai_analysis = None
+        st.session_state.ai_visual_explanation = None
+        st.session_state.ai_visual_error = ""
+        st.session_state.ai_visual_step = 0
         clear_ai_practice_state()
         st.session_state.pop("ai_detected_question_selector", None)
 
@@ -1312,6 +1642,9 @@ with ai_tab:
         st.session_state.ai_question_feasibility_error = ""
         st.session_state.ai_question_feasibility_signature = ""
         st.session_state.ai_analysis = None
+        st.session_state.ai_visual_explanation = None
+        st.session_state.ai_visual_error = ""
+        st.session_state.ai_visual_step = 0
         clear_ai_practice_state()
 
     st.markdown("### Check the question before marking")
@@ -1323,6 +1656,9 @@ with ai_tab:
         st.session_state.ai_question_feasibility = None
         st.session_state.ai_question_feasibility_error = ""
         st.session_state.ai_analysis = None
+        st.session_state.ai_visual_explanation = None
+        st.session_state.ai_visual_error = ""
+        st.session_state.ai_visual_step = 0
         clear_ai_practice_state()
         if not consent:
             st.session_state.ai_question_feasibility_error = (
@@ -1372,6 +1708,9 @@ with ai_tab:
         st.session_state.ai_analysis = None
         st.session_state.ai_error = ""
         st.session_state.ai_fallback_result = None
+        st.session_state.ai_visual_explanation = None
+        st.session_state.ai_visual_error = ""
+        st.session_state.ai_visual_step = 0
         clear_ai_practice_state()
         if not consent:
             st.error("Confirm the Gemini data-sharing acknowledgement before sending the submission.")
@@ -1398,6 +1737,21 @@ with ai_tab:
                         model=model,
                     )
                 st.session_state.ai_analysis = analysis
+                if _visual_plan_is_recommended(analysis, question_for_analysis):
+                    try:
+                        with st.spinner("Building an interactive visual explanation for this geometry/graph question..."):
+                            visual_plan = generate_visual_explanation(
+                                track_label=track_label,
+                                question_text=question_for_analysis,
+                                analysis=analysis,
+                                question_assets=assets_q,
+                                api_key=explicit_key,
+                                model=model,
+                            )
+                        st.session_state.ai_visual_explanation = visual_plan
+                    except GeminiTutorError as visual_exc:
+                        # Visuals are an enhancement; never lose the verified reasoning analysis if this second call fails.
+                        st.session_state.ai_visual_error = str(visual_exc)
                 initialize_ai_practice(analysis)
                 st.rerun()
             except GeminiTutorError as exc:
@@ -1417,6 +1771,12 @@ with ai_tab:
     analysis: GeminiAnalysis | None = st.session_state.ai_analysis
     if analysis is not None:
         render_ai_analysis(analysis)
+        visual_plan: VisualExplanationResult | None = st.session_state.ai_visual_explanation
+        if visual_plan is not None:
+            st.markdown("---")
+            render_visual_explanation(visual_plan)
+        elif st.session_state.ai_visual_error:
+            st.caption("Interactive visual explanation unavailable for this attempt: " + st.session_state.ai_visual_error)
         st.markdown("---")
         st.markdown("## Adaptive targeted practice")
         st.write(
