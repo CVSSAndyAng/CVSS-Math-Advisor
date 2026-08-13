@@ -1530,23 +1530,101 @@ try:
 except Exception:
     _visual_2d_component = None
 
-# Compact 2D schematic used inside targeted practice. It reuses the safe declarative
-# JSXGraph renderer but is intentionally smaller than the full visual-explanation board.
+# Interactive 2D workspace used inside targeted practice. Geometry questions get a
+# clean schematic; graph/coordinate questions additionally get a GeoGebra-like
+# student workspace with draggable points and segment construction tools. All
+# interaction remains in the browser, so plotting does not rerun Streamlit.
 _PRACTICE_DIAGRAM_HTML = """
-<div class="omt-visual2d-shell omt-practice-diagram-shell">
+<div class="omt-practice-workspace">
+  <div class="omt-practice-toolbar">
+    <button type="button" data-tool="move" class="active">Move</button>
+    <button type="button" data-tool="point">Point</button>
+    <button type="button" data-tool="segment">Segment</button>
+    <button type="button" data-tool="clear">Clear my work</button>
+  </div>
+  <div class="omt-practice-status">Explore the diagram. On graphs, choose Point or Segment to add your own construction.</div>
   <div class="omt-visual2d-board"></div>
 </div>
 """
 
 _PRACTICE_DIAGRAM_CSS = """
-.omt-practice-diagram-shell { width:100%; }
-.omt-practice-diagram-shell .omt-visual2d-board {
-  width:100%; height:320px; min-height:280px;
-  border:1px solid rgba(128,128,128,.28); border-radius:.75rem;
+.omt-practice-workspace { width:100%; }
+.omt-practice-toolbar { display:flex; gap:.4rem; flex-wrap:wrap; margin-bottom:.5rem; }
+.omt-practice-toolbar button {
+  border:1px solid #cbd5e1; background:#fff; color:#334155; border-radius:.65rem;
+  padding:.45rem .72rem; font-size:.82rem; font-weight:650; cursor:pointer;
+}
+.omt-practice-toolbar button.active { background:#eff6ff; border-color:#60a5fa; color:#1d4ed8; }
+.omt-practice-status { font-size:.78rem; color:#64748b; margin:0 0 .45rem; }
+.omt-practice-workspace .omt-visual2d-board {
+  width:100%; height:360px; min-height:300px;
+  border:1px solid rgba(128,128,128,.28); border-radius:.9rem;
   overflow:hidden; background:#fff; touch-action:none;
 }
 @media (max-width:640px) {
-  .omt-practice-diagram-shell .omt-visual2d-board { height:300px; min-height:260px; }
+  .omt-practice-workspace .omt-visual2d-board { height:340px; min-height:290px; }
+  .omt-practice-toolbar button { min-height:42px; padding:.55rem .8rem; }
+}
+"""
+
+_PRACTICE_DIAGRAM_JS = r"""
+const JXG_URL = 'https://cdn.jsdelivr.net/npm/jsxgraph@1.12.2/distrib/jsxgraphcore.mjs';
+async function loadJXG(){
+  if(!globalThis.__omtPracticeJXGPromise) globalThis.__omtPracticeJXGPromise=import(JXG_URL);
+  const mod=await globalThis.__omtPracticeJXGPromise; return mod.default||mod.JXG||mod;
+}
+export default async function(component){
+  const {parentElement,data}=component;
+  const stage=parentElement.querySelector('.omt-visual2d-board');
+  const toolbar=parentElement.querySelector('.omt-practice-toolbar');
+  const status=parentElement.querySelector('.omt-practice-status');
+  const scene=data?.scene||{};
+  let JXG;
+  try{JXG=await loadJXG();}catch(err){console.error(err);stage.textContent='Interactive maths workspace could not load.';return;}
+  try{if(parentElement.__omtPracticeBoard)JXG.JSXGraph.freeBoard(parentElement.__omtPracticeBoard);}catch(_){ }
+  stage.replaceChildren(); stage.id=`omt-practice-${Math.random().toString(36).slice(2)}`;
+  const xMin=Number(scene.x_min??-5),xMax=Number(scene.x_max??5),yMin=Number(scene.y_min??-5),yMax=Number(scene.y_max??5);
+  const graphMode=Boolean(scene.show_axes);
+  const board=JXG.JSXGraph.initBoard(stage.id,{boundingbox:[xMin,yMax,xMax,yMin],axis:graphMode,keepaspectratio:scene.keep_aspect!==false,showNavigation:false,showCopyright:false,pan:{enabled:true,needShift:false},zoom:{wheel:true,needShift:false,factorX:1.18,factorY:1.18}});
+  parentElement.__omtPracticeBoard=board;
+  const pts=new Map();
+  for(const p of(scene.points||[])){
+    const obj=board.create('point',[Number(p.x),Number(p.y)],{name:p.label||'',fixed:true,highlight:false,size:3.8,strokeColor:'#0f172a',fillColor:'#0f172a',label:{fontSize:14,offset:[7,7]}});pts.set(p.id,obj);
+  }
+  for(const seg of(scene.segments||[])){
+    const a=pts.get(seg.start),b=pts.get(seg.end);if(!a||!b)continue;
+    board.create('segment',[a,b],{name:seg.label||'',withLabel:Boolean(seg.label),fixed:true,highlight:false,strokeColor:'#475569',strokeWidth:2.3,dash:seg.dashed?2:0,label:{fontSize:13}});
+  }
+  for(const poly of(scene.polylines||[])){
+    const arr=Array.isArray(poly.points)?poly.points:[];if(arr.length<2)continue;
+    const xs=arr.map(v=>Number(v[0])),ys=arr.map(v=>Number(v[1]));
+    board.create('curve',[xs,ys],{fixed:true,highlight:false,strokeColor:'#475569',strokeWidth:2.3,dash:poly.dashed?2:0});
+  }
+  for(const c of(scene.circles||[])){
+    const center=pts.get(c.center);if(!center)continue;
+    board.create('circle',[center,Number(c.radius)],{fixed:true,highlight:false,strokeColor:'#475569',strokeWidth:2.2,fillOpacity:0});
+  }
+  for(const a of(scene.angles||[])){
+    const p1=pts.get(a.arm1),v=pts.get(a.vertex),p2=pts.get(a.arm2);if(!p1||!v||!p2)continue;
+    board.create('angle',[p1,v,p2],{name:a.label||'',withLabel:Boolean(a.label),fixed:true,highlight:false,radius:Number(a.radius||.7),strokeColor:'#2563eb',fillColor:'#dbeafe',fillOpacity:.35,label:{fontSize:13}});
+  }
+  const student=[]; let tool='move', first=null;
+  const setTool=(name)=>{tool=name;first=null;toolbar.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===name));status.textContent=name==='point'?'Tap the grid to plot a point. Drag your plotted points to adjust them.':name==='segment'?'Tap two positions to draw a segment.':'Drag to pan/explore. Use the mouse wheel or pinch gesture to zoom.';};
+  const clearStudent=()=>{for(const o of student.splice(0))try{board.removeObject(o);}catch(_){ } first=null;board.update();};
+  toolbar.onclick=(ev)=>{const b=ev.target.closest('button[data-tool]');if(!b)return;const name=b.dataset.tool;if(name==='clear'){clearStudent();return;}setTool(name);};
+  board.on('down',(ev)=>{
+    if(tool==='move')return;
+    const c=new JXG.Coords(JXG.COORDS_BY_SCREEN,[ev.offsetX,ev.offsetY],board);const x=c.usrCoords[1],y=c.usrCoords[2];
+    if(tool==='point'){
+      const p=board.create('point',[x,y],{name:'',fixed:false,size:4,strokeColor:'#dc2626',fillColor:'#fee2e2',strokeWidth:2});student.push(p);board.update();return;
+    }
+    if(tool==='segment'){
+      if(!first){first=board.create('point',[x,y],{name:'',fixed:false,size:4,strokeColor:'#dc2626',fillColor:'#fee2e2'});student.push(first);status.textContent='Now tap the second endpoint.';}
+      else{const p2=board.create('point',[x,y],{name:'',fixed:false,size:4,strokeColor:'#dc2626',fillColor:'#fee2e2'});const s=board.create('segment',[first,p2],{fixed:false,strokeColor:'#dc2626',strokeWidth:2.6});student.push(p2,s);first=null;status.textContent='Segment added. Tap two more positions to add another.';}board.update();
+    }
+  });
+  if(!graphMode){toolbar.querySelector('[data-tool="point"]').style.display='none';toolbar.querySelector('[data-tool="segment"]').style.display='none';status.textContent='Use the schematic to understand the geometry. Drag to pan and pinch/wheel to zoom.';}
+  setTool('move');
 }
 """
 
@@ -1555,7 +1633,7 @@ try:
         "omt_targeted_practice_diagram",
         html=_PRACTICE_DIAGRAM_HTML,
         css=_PRACTICE_DIAGRAM_CSS,
-        js=_VISUAL_2D_JS,
+        js=_PRACTICE_DIAGRAM_JS,
         isolate_styles=False,
     )
 except Exception:
@@ -1856,7 +1934,7 @@ def render_targeted_practice_focus(pq: TargetedPracticeQuestion, *, key: str) ->
         if diagram is not None:
             visual_col, info_col = st.columns([1.25, .85], gap="large", vertical_alignment="top")
             with visual_col:
-                st.caption("Visual model")
+                st.caption("Interactive graph workspace" if bool(getattr(diagram, "show_axes", False)) else "Question diagram")
                 if _practice_diagram_component is not None:
                     _practice_diagram_component(
                         data={
@@ -1874,7 +1952,7 @@ def render_targeted_practice_focus(pq: TargetedPracticeQuestion, *, key: str) ->
                     )
                 else:
                     st.info("The practice diagram could not load in this browser session.")
-                st.caption(diagram_note or "Schematic only · not drawn to scale")
+                st.caption(diagram_note or ("Plot points or draw segments to explore the graph. Your red constructions are for working only." if bool(getattr(diagram, "show_axes", False)) else "Schematic only · not drawn to scale"))
             with info_col:
                 if key_information:
                     st.caption("Given")
