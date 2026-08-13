@@ -21,6 +21,7 @@ from gemini_service import (
     DEFAULT_MODEL,
     GeminiAnalysis,
     GeminiTutorError,
+    MathVerificationResult,
     PracticeEvaluation,
     QuestionDetectionResult,
     QuestionFeasibilityResult,
@@ -35,6 +36,7 @@ from gemini_service import (
     generate_visual_explanation,
     get_api_key,
     required_parts_for_question,
+    verify_question_math,
 )
 from offline_engine import (
     TRACKS,
@@ -1124,9 +1126,11 @@ def _render_function_graph_tool(pq: TargetedPracticeQuestion | None, *, key_base
     if _practice_diagram_component is None:
         st.info("The interactive graph component is unavailable in this browser session.")
         return
+    graph_grid = st.toggle("Show gridlines", value=True, key=f"{key_base}_function_grid")
     _practice_diagram_component(
         data={
             "scene": scene,
+            "show_grid": graph_grid,
             "step": {"highlight_ids": [], "dim_ids": [], "animate_ids": []},
             "visible_ids": [], "animate_ids": [], "reveal_mode": False, "animation_nonce": 0,
         },
@@ -1444,6 +1448,7 @@ export default async function(component) {
   const board = JXG.JSXGraph.initBoard(stage.id, {
     boundingbox: [xMin, yMax, xMax, yMin],
     axis: Boolean(scene.show_axes),
+    grid: Boolean(data?.show_grid),
     keepaspectratio: scene.keep_aspect !== false,
     showNavigation: false,
     showCopyright: false,
@@ -2059,7 +2064,7 @@ export default async function(component){
   stage.replaceChildren(); stage.id=`omt-practice-${Math.random().toString(36).slice(2)}`;
   const xMin=Number(scene.x_min??-5),xMax=Number(scene.x_max??5),yMin=Number(scene.y_min??-5),yMax=Number(scene.y_max??5);
   const graphMode=Boolean(scene.show_axes);
-  const board=JXG.JSXGraph.initBoard(stage.id,{boundingbox:[xMin,yMax,xMax,yMin],axis:graphMode,keepaspectratio:scene.keep_aspect!==false,showNavigation:false,showCopyright:false,pan:{enabled:true,needShift:false},zoom:{wheel:true,needShift:false,factorX:1.18,factorY:1.18}});
+  const board=JXG.JSXGraph.initBoard(stage.id,{boundingbox:[xMin,yMax,xMax,yMin],axis:graphMode,grid:Boolean(data?.show_grid),keepaspectratio:scene.keep_aspect!==false,showNavigation:false,showCopyright:false,pan:{enabled:true,needShift:false},zoom:{wheel:true,needShift:false,factorX:1.18,factorY:1.18}});
   parentElement.__omtPracticeBoard=board;
   const pts=new Map();
   for(const p of(scene.points||[])){
@@ -2232,6 +2237,14 @@ def render_visual_explanation(plan: VisualExplanationResult, question_files: lis
     st.caption(
         f"Reconstruction confidence: {plan.reconstruction_confidence.title()}. {plan.reconstruction_note}"
     )
+    show_visual_grid = False
+    if plan.mode in {"geometry2d", "graph2d"}:
+        show_visual_grid = st.toggle(
+            "Show gridlines",
+            value=(plan.mode == "graph2d"),
+            key="ai_visual_show_grid",
+            help="Turn gridlines on or off without changing the mathematical construction.",
+        )
     if plan.mode == "geometry3d" and getattr(plan, "reconstructed_parts", None):
         st.markdown("**3D form identified from the question:** " + " · ".join(plan.reconstructed_parts))
     if plan.mode == "geometry3d":
@@ -2310,7 +2323,7 @@ def render_visual_explanation(plan: VisualExplanationResult, question_files: lis
         scene_payload = plan.scene_2d.model_dump()
         if _visual_2d_component is not None:
             _visual_2d_component(
-                data={"scene": scene_payload, **component_data},
+                data={"scene": scene_payload, "show_grid": show_visual_grid, **component_data},
                 default={},
                 key="ai_visual2d",
                 width="stretch",
@@ -2395,10 +2408,16 @@ def render_targeted_practice_focus(pq: TargetedPracticeQuestion, *, key: str) ->
             visual_col, info_col = st.columns([1.25, .85], gap="large", vertical_alignment="top")
             with visual_col:
                 st.caption("Interactive graph workspace" if bool(getattr(diagram, "show_axes", False)) else "Question diagram")
+                practice_grid = st.toggle(
+                    "Show gridlines",
+                    value=bool(getattr(diagram, "show_axes", False)),
+                    key=f"practice_grid_{key}",
+                )
                 if _practice_diagram_component is not None:
                     _practice_diagram_component(
                         data={
                             "scene": diagram.model_dump(),
+                            "show_grid": practice_grid,
                             "step": {"highlight_ids": [], "dim_ids": [], "animate_ids": []},
                             "visible_ids": [],
                             "animate_ids": [],
@@ -2465,6 +2484,10 @@ def init_state() -> None:
         "ai_practice_ready_to_advance": False,
         "ai_practice_finished": False,
         "ai_practice_question_version": 0,
+        "ai_cached_verification": None,
+        "ai_cached_verification_signature": "",
+        "batch_results": [],
+        "batch_error": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -3054,6 +3077,12 @@ with st.sidebar:
             index=0,
             help="Free-tier availability and quotas depend on the Google account/project.",
         )
+        analysis_speed = st.radio(
+            "Analysis mode",
+            ["Fast", "Full"],
+            horizontal=True,
+            help="Fast keeps mathematical verification but defers the optional visual-explanation API call until you request it. Full builds visuals automatically when appropriate.",
+        )
     if has_key:
         st.markdown('<div class="omt-status-pill good">● <span>Gemini online</span></div>', unsafe_allow_html=True)
     else:
@@ -3089,9 +3118,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ai_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
+ai_tab, batch_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
     [
         "✨ Analyse",
+        "👥 Class trends",
         "🧠 Offline practice",
         "✎ Algebra check",
         "📚 Syllabus",
@@ -3126,6 +3156,11 @@ with ai_tab:
                 key="ai_question_files",
                 help="Photos, screenshots and PDFs are supported.",
             )
+            working_in_question_upload = st.checkbox(
+                "Student's working is already visible in the question upload",
+                key="ai_working_embedded_in_question",
+                help="Use this when the photo/PDF contains both the printed question and the student's handwritten or typed solution.",
+            )
 
     with input_right:
         with st.container(border=True):
@@ -3158,6 +3193,8 @@ with ai_tab:
         st.session_state.ai_visual_explanation = None
         st.session_state.ai_visual_error = ""
         st.session_state.ai_visual_step = 0
+        st.session_state.ai_cached_verification = None
+        st.session_state.ai_cached_verification_signature = ""
         clear_ai_practice_state()
         st.session_state.pop("ai_detected_question_selector", None)
 
@@ -3301,10 +3338,33 @@ with ai_tab:
             working_for_gemini = (
                 f"[Student working input method: {w_input_mode}]\n{w_text}" if w_text.strip() else w_text
             )
+            if working_in_question_upload:
+                embedded_note = "[Student working is visible in the same uploaded question image/PDF. Inspect the handwritten/annotated working in that upload as the student's solution.]"
+                working_for_gemini = (working_for_gemini + "\n" + embedded_note).strip()
             try:
                 assets_q = uploaded_assets(q_files)
                 assets_w = uploaded_assets(w_files)
-                with st.spinner("Gemini is checking the mathematics and the student's reasoning..."):
+                if working_in_question_upload:
+                    assets_w = [*assets_w, *assets_q]
+
+                # Cache the expensive independent verification for the current question so
+                # retries/new student working on the same question are faster.
+                verification = st.session_state.get("ai_cached_verification")
+                if st.session_state.get("ai_cached_verification_signature") != current_feasibility_signature:
+                    verification = None
+                if verification is None:
+                    with st.spinner("Verifying the question mathematics once..."):
+                        verification = verify_question_math(
+                            track_label=track_label,
+                            question_text=question_for_analysis,
+                            question_assets=assets_q,
+                            api_key=explicit_key,
+                            model=model,
+                        )
+                    st.session_state.ai_cached_verification = verification
+                    st.session_state.ai_cached_verification_signature = current_feasibility_signature
+
+                with st.spinner("Gemini is checking the student's reasoning..."):
                     analysis = analyze_submission(
                         track_label=track_label,
                         question_text=question_for_analysis,
@@ -3314,9 +3374,10 @@ with ai_tab:
                         offline_evidence=evidence,
                         api_key=explicit_key,
                         model=model,
+                        verification=verification,
                     )
                 st.session_state.ai_analysis = analysis
-                if _visual_plan_is_recommended(analysis, question_for_analysis):
+                if analysis_speed == "Full" and _visual_plan_is_recommended(analysis, question_for_analysis):
                     try:
                         with st.spinner("Building an interactive visual explanation for this geometry/graph question..."):
                             visual_plan = generate_visual_explanation(
@@ -3356,6 +3417,19 @@ with ai_tab:
             render_visual_explanation(visual_plan, q_files)
         elif st.session_state.ai_visual_error:
             st.caption("Interactive visual explanation unavailable for this attempt: " + st.session_state.ai_visual_error)
+        elif _visual_plan_is_recommended(analysis, question_for_analysis):
+            if st.button("Build visual explanation", key="build_visual_on_demand", use_container_width=True):
+                try:
+                    assets_q = uploaded_assets(q_files)
+                    with st.spinner("Building the interactive visual explanation..."):
+                        st.session_state.ai_visual_explanation = generate_visual_explanation(
+                            track_label=track_label, question_text=question_for_analysis, analysis=analysis,
+                            question_assets=assets_q, api_key=explicit_key, model=model,
+                        )
+                    st.rerun()
+                except GeminiTutorError as exc:
+                    st.session_state.ai_visual_error = str(exc)
+                    st.rerun()
         st.markdown("---")
         st.markdown('<div class="omt-section-kicker">Adaptive practice</div>', unsafe_allow_html=True)
         st.markdown('<div class="omt-section-title">Build mastery one transfer level at a time</div>', unsafe_allow_html=True)
@@ -3530,6 +3604,225 @@ with ai_tab:
                     render_mathio(line)
 
 # ---------- Offline generated practice ----------
+
+# ---------- Batch / class trend analysis ----------
+with batch_tab:
+    st.markdown('<div class="omt-section-kicker">Class insight</div>', unsafe_allow_html=True)
+    st.markdown('<div class="omt-section-title">Analyse several student solutions to the same question</div>', unsafe_allow_html=True)
+    st.markdown(
+        "<div class='omt-section-copy'>The question is verified once, then each student's working is analysed separately. No visual simulation is generated in batch mode, which reduces API calls and improves speed.</div>",
+        unsafe_allow_html=True,
+    )
+
+    with st.container(border=True):
+        st.markdown("#### 1 · Shared question")
+        batch_q_text = st.text_area(
+            "Shared question text",
+            key="batch_question_text",
+            height=120,
+            placeholder="Type the common question, or upload it below.",
+        )
+        batch_q_files = st.file_uploader(
+            "Upload shared question image/PDF",
+            type=["png", "jpg", "jpeg", "webp", "pdf"],
+            accept_multiple_files=True,
+            key="batch_question_files",
+        )
+
+    with st.container(border=True):
+        st.markdown("#### 2 · Student solutions")
+        batch_solution_files = st.file_uploader(
+            "Upload several student solutions",
+            type=["png", "jpg", "jpeg", "webp", "pdf"],
+            accept_multiple_files=True,
+            key="batch_solution_files",
+            help="Each uploaded file is treated as one student's submission. A multi-page PDF can contain all pages for that student.",
+        )
+        batch_solution_contains_question = st.checkbox(
+            "Each student solution file also contains the printed question",
+            key="batch_solution_contains_question",
+            help="Useful for photographed worksheets where the question and the student's working are on the same page.",
+        )
+        show_batch_filenames = st.checkbox(
+            "Show uploaded filenames in results",
+            value=False,
+            key="batch_show_filenames",
+            help="Leave off when filenames contain student names. Results will use Student 01, Student 02, etc.",
+        )
+        batch_consent = st.checkbox(
+            "Allow Gemini to analyse these student submissions",
+            key="batch_gemini_consent",
+            help="Remove names, NRICs and other unnecessary identifiers before upload.",
+        )
+
+    if batch_solution_files and len(batch_solution_files) > 30:
+        st.warning("For reliability, analyse at most 30 student submissions at a time. Split larger classes into batches.")
+
+    if st.button(
+        "Analyse class batch",
+        type="primary",
+        use_container_width=True,
+        disabled=not bool(batch_solution_files),
+        key="batch_analyse_button",
+    ):
+        st.session_state.batch_results = []
+        st.session_state.batch_error = ""
+        if not batch_consent:
+            st.session_state.batch_error = "Confirm the Gemini data-sharing acknowledgement before batch analysis."
+        elif len(batch_solution_files or []) > 30:
+            st.session_state.batch_error = "Please limit each batch to 30 student submissions."
+        elif not batch_q_text.strip() and not batch_q_files and not batch_solution_contains_question:
+            st.session_state.batch_error = "Provide the shared question, or confirm that each student file contains the printed question."
+        else:
+            try:
+                # If the printed question is embedded in every student file and no separate
+                # question upload exists, use the first submission as the shared question source.
+                question_source_files = list(batch_q_files or [])
+                if not question_source_files and batch_solution_contains_question and batch_solution_files:
+                    question_source_files = [batch_solution_files[0]]
+                batch_assets_q = uploaded_assets(question_source_files)
+
+                with st.spinner("Checking the shared question once for the whole class..."):
+                    feasibility = assess_question_feasibility(
+                        track_label=track_label,
+                        question_text=batch_q_text,
+                        question_assets=batch_assets_q,
+                        api_key=explicit_key,
+                        model=model,
+                    )
+                    if not feasibility.can_analyse_student_work:
+                        raise GeminiTutorError(
+                            "The shared question needs clarification before class analysis: "
+                            + ("; ".join(feasibility.issues[0].description for _ in [0]) if feasibility.issues else feasibility.action_needed),
+                            category="input",
+                        )
+                    shared_verification = verify_question_math(
+                        track_label=track_label,
+                        question_text=batch_q_text,
+                        question_assets=batch_assets_q,
+                        api_key=explicit_key,
+                        model=model,
+                    )
+
+                progress = st.progress(0, text="Starting class analysis...")
+                results: list[dict[str, Any]] = []
+                total = len(batch_solution_files)
+                for idx, solution_file in enumerate(batch_solution_files, 1):
+                    student_label = solution_file.name if show_batch_filenames else f"Student {idx:02d}"
+                    progress.progress((idx - 1) / max(total, 1), text=f"Analysing {student_label} ({idx}/{total})...")
+                    try:
+                        solution_assets = uploaded_assets([solution_file])
+                        student_question_assets = batch_assets_q
+                        if batch_solution_contains_question:
+                            student_question_assets = solution_assets if not batch_q_files else batch_assets_q
+                        analysis = analyze_submission(
+                            track_label=track_label,
+                            question_text=batch_q_text,
+                            working_text="[The student's solution is supplied in the uploaded file. Read all visible working and annotations conservatively.]",
+                            question_assets=student_question_assets,
+                            working_assets=solution_assets,
+                            offline_evidence="",
+                            api_key=explicit_key,
+                            model=model,
+                            verification=shared_verification,
+                        )
+                        issue_types = [
+                            str(step.issue_type).strip().lower()
+                            for step in analysis.steps
+                            if str(step.issue_type).strip().lower() not in {"", "none", "no issue"}
+                        ]
+                        presentation_count = sum(1 for step in analysis.steps if getattr(step, "presentation_error", False))
+                        results.append({
+                            "student": student_label,
+                            "status": "Analysed",
+                            "judgement": analysis.overall_judgement.replace("_", " ").title(),
+                            "first_logic_break_step": analysis.first_logic_break_step,
+                            "misconception": analysis.misconception_or_gap,
+                            "issue_types": issue_types,
+                            "presentation_errors": presentation_count,
+                            "analysis": analysis,
+                        })
+                    except Exception as exc:
+                        results.append({
+                            "student": student_label,
+                            "status": "Could not analyse",
+                            "judgement": "—",
+                            "first_logic_break_step": 0,
+                            "misconception": str(exc),
+                            "issue_types": [],
+                            "presentation_errors": 0,
+                            "analysis": None,
+                        })
+                progress.progress(1.0, text="Class analysis complete.")
+                st.session_state.batch_results = results
+                st.rerun()
+            except GeminiTutorError as exc:
+                st.session_state.batch_error = str(exc)
+                st.rerun()
+
+    if st.session_state.batch_error:
+        st.error(st.session_state.batch_error)
+
+    batch_results = list(st.session_state.get("batch_results", []) or [])
+    if batch_results:
+        successful = [item for item in batch_results if item.get("analysis") is not None]
+        st.markdown("### Class trend overview")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Submissions", len(batch_results))
+        c2.metric("Analysed", len(successful))
+        with_logic_break = sum(1 for item in successful if int(item.get("first_logic_break_step", 0) or 0) > 0)
+        c3.metric("With a logic break", with_logic_break)
+
+        issue_counter = Counter()
+        judgement_counter = Counter()
+        break_counter = Counter()
+        for item in successful:
+            judgement_counter[item["judgement"]] += 1
+            for issue in item.get("issue_types", []):
+                issue_counter[issue] += 1
+            step_no = int(item.get("first_logic_break_step", 0) or 0)
+            if step_no > 0:
+                break_counter[f"Step {step_no}"] += 1
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("#### Common issue categories")
+            if issue_counter:
+                issue_df = pd.DataFrame(
+                    [{"Issue": k.title(), "Students": v} for k, v in issue_counter.most_common(10)]
+                ).set_index("Issue")
+                st.bar_chart(issue_df)
+            else:
+                st.success("No recurring issue category was identified in the analysed submissions.")
+        with col_b:
+            st.markdown("#### First logic-break location")
+            if break_counter:
+                break_df = pd.DataFrame(
+                    [{"Step": k, "Students": v} for k, v in sorted(break_counter.items())]
+                ).set_index("Step")
+                st.bar_chart(break_df)
+            else:
+                st.success("No material logic break was identified in the analysed submissions.")
+
+        summary_rows = []
+        for item in batch_results:
+            summary_rows.append({
+                "Student": item["student"],
+                "Status": item["status"],
+                "Judgement": item["judgement"],
+                "First logic break": item["first_logic_break_step"] or "—",
+                "Presentation errors": item["presentation_errors"],
+                "Main misconception / gap": item["misconception"],
+            })
+        st.markdown("#### Student-by-student summary")
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+        with st.expander("Review individual analyses", expanded=False):
+            for item in successful:
+                with st.expander(item["student"], expanded=False):
+                    render_ai_analysis(item["analysis"])
+
+
 with practice_tab:
     st.subheader("No-credit syllabus-generated practice")
     st.caption("This tab never calls Gemini. It keeps working even if the API key is missing or a free-tier quota is reached.")

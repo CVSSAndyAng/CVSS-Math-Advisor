@@ -1308,6 +1308,7 @@ def analyze_submission(
     api_key: str | None = None,
     model: str | None = None,
     client=None,
+    verification: MathVerificationResult | None = None,
 ) -> GeminiAnalysis:
     question_assets = question_assets or []
     working_assets = working_assets or []
@@ -1318,7 +1319,7 @@ def analyze_submission(
 
     active_client = client or _make_client(api_key)
 
-    verification = verify_question_math(
+    verification = verification or verify_question_math(
         track_label=track_label,
         question_text=question_text,
         question_assets=question_assets,
