@@ -55,17 +55,114 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-.block-container {padding-top: 1.3rem; padding-bottom: 3rem; max-width: 1220px;}
-.soft-card {border: 1px solid rgba(128,128,128,.28); border-radius: .8rem; padding: 1rem 1.1rem; margin: .4rem 0 1rem 0;}
-.small {font-size:.88rem; opacity:.82;}
-.ok {background: rgba(0,160,90,.08); border-radius:.6rem; padding:.65rem .8rem;}
-.warn {background: rgba(255,170,0,.08); border-radius:.6rem; padding:.65rem .8rem;}
+:root {
+  --omt-ink: #172033;
+  --omt-muted: #667085;
+  --omt-border: #e4e7ec;
+  --omt-surface: #ffffff;
+  --omt-soft: #f7f9fc;
+  --omt-brand: #3b5ccc;
+  --omt-brand-soft: #eef2ff;
+  --omt-success: #12805c;
+  --omt-success-soft: #ecfdf3;
+  --omt-warn: #b25e09;
+  --omt-warn-soft: #fff7ed;
+  --omt-danger: #c2414b;
+  --omt-danger-soft: #fff1f2;
+  --omt-radius: 18px;
+  --omt-shadow: 0 10px 30px rgba(23, 32, 51, .07);
+}
+
+html, body, [class*="css"] { color: var(--omt-ink); }
+[data-testid="stAppViewContainer"] { background: #f6f8fc; }
+[data-testid="stHeader"] { background: rgba(246,248,252,.86); backdrop-filter: blur(10px); }
+.block-container { padding-top: 1.25rem; padding-bottom: 4rem; max-width: 1240px; }
+
+h1, h2, h3, h4 { letter-spacing: -.025em; color: var(--omt-ink); }
+h1 { font-weight: 800 !important; }
+h2, h3 { font-weight: 740 !important; }
+p, li { line-height: 1.58; }
+
+[data-testid="stSidebar"] { background: linear-gradient(180deg, #f9fbff 0%, #f4f6fb 100%); border-right: 1px solid var(--omt-border); }
+[data-testid="stSidebar"] .block-container { padding-top: 1rem; }
+
+.omt-hero {
+  background: radial-gradient(circle at 92% 12%, rgba(112, 132, 255, .18), transparent 28%),
+              linear-gradient(135deg, #ffffff 0%, #f7f8ff 100%);
+  border: 1px solid #e1e6f4;
+  border-radius: 24px;
+  padding: 1.55rem 1.7rem;
+  box-shadow: var(--omt-shadow);
+  margin: .25rem 0 1.25rem;
+}
+.omt-eyebrow { color: var(--omt-brand); font-weight: 750; font-size: .82rem; letter-spacing: .08em; text-transform: uppercase; margin-bottom: .35rem; }
+.omt-hero h1 { margin: 0 0 .45rem; font-size: clamp(1.8rem, 3.3vw, 2.75rem); line-height: 1.08; }
+.omt-hero p { color: var(--omt-muted); font-size: 1.02rem; margin: 0; max-width: 780px; }
+.omt-chip-row { display:flex; flex-wrap:wrap; gap:.45rem; margin-top:1rem; }
+.omt-chip { display:inline-flex; align-items:center; gap:.35rem; background:#fff; border:1px solid var(--omt-border); border-radius:999px; padding:.38rem .68rem; font-size:.82rem; color:#475467; }
+
+.omt-side-brand { padding:.45rem .15rem .85rem; }
+.omt-side-brand .title { font-size:1.2rem; font-weight:800; letter-spacing:-.02em; }
+.omt-side-brand .sub { color:var(--omt-muted); font-size:.86rem; line-height:1.45; margin-top:.25rem; }
+.omt-status-pill { display:flex; align-items:center; gap:.45rem; border-radius:12px; padding:.62rem .72rem; font-size:.84rem; margin:.35rem 0; }
+.omt-status-pill.good { background:var(--omt-success-soft); color:#116149; border:1px solid #c9f1df; }
+.omt-status-pill.neutral { background:var(--omt-brand-soft); color:#4353a3; border:1px solid #dfe4ff; }
+
+.omt-section-kicker { color:var(--omt-brand); font-weight:750; font-size:.76rem; text-transform:uppercase; letter-spacing:.08em; }
+.omt-section-title { font-size:1.45rem; font-weight:780; letter-spacing:-.025em; margin:.08rem 0 .25rem; }
+.omt-section-copy { color:var(--omt-muted); margin-bottom:.9rem; }
+
+.omt-focus-card {
+  background: linear-gradient(145deg, #ffffff, #fbfcff);
+  border: 1px solid #dfe4ee;
+  border-radius: 20px;
+  box-shadow: 0 7px 22px rgba(23,32,51,.055);
+  padding: 1rem 1.1rem;
+}
+.omt-focus-title { font-size:.8rem; text-transform:uppercase; letter-spacing:.07em; color:var(--omt-brand); font-weight:760; margin-bottom:.4rem; }
+.omt-key-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:.55rem; margin:.7rem 0; }
+.omt-key-item { background:#f8faff; border:1px solid #e6eaf5; border-radius:12px; padding:.62rem .72rem; }
+
+.omt-stage-row { display:grid; grid-template-columns:repeat(3,1fr); gap:.65rem; margin:.7rem 0 1.1rem; }
+.omt-stage { border:1px solid var(--omt-border); background:#fff; border-radius:14px; padding:.72rem .8rem; min-height:66px; }
+.omt-stage .name { font-weight:720; font-size:.92rem; }
+.omt-stage .detail { color:var(--omt-muted); font-size:.78rem; margin-top:.18rem; }
+.omt-stage.current { border-color:#aab8ff; background:#f4f6ff; box-shadow:0 0 0 2px rgba(59,92,204,.06); }
+.omt-stage.done { border-color:#bfe8d8; background:#f1fbf6; }
+.omt-stage.locked { opacity:.72; }
+
+.omt-logic-break { background:var(--omt-warn-soft); border:1px solid #fed7aa; border-left:5px solid #f59e0b; border-radius:14px; padding:.8rem 1rem; margin:.7rem 0 1rem; }
+.omt-success-card { background:var(--omt-success-soft); border:1px solid #cceedd; border-left:5px solid #1ca878; border-radius:14px; padding:.8rem 1rem; margin:.7rem 0 1rem; }
+
+/* Streamlit cards and widgets */
+[data-testid="stVerticalBlockBorderWrapper"] { border-color: var(--omt-border) !important; border-radius: var(--omt-radius) !important; background: var(--omt-surface); box-shadow: 0 4px 18px rgba(23,32,51,.035); }
+[data-testid="stMetric"] { background:#fff; border:1px solid var(--omt-border); border-radius:15px; padding:.75rem .85rem; }
+[data-testid="stMetricValue"] { font-weight:780; letter-spacing:-.03em; }
+[data-testid="stExpander"] { border:1px solid var(--omt-border) !important; border-radius:14px !important; background:#fff; overflow:hidden; }
+[data-testid="stFileUploader"] { border-radius:16px; }
+.stTextArea textarea, .stTextInput input { border-radius:12px !important; }
+
+.stButton > button { border-radius:12px; font-weight:680; border-color:#d8deea; transition:transform .12s ease, box-shadow .12s ease; }
+.stButton > button:hover { transform:translateY(-1px); box-shadow:0 5px 14px rgba(23,32,51,.08); }
+.stButton > button[kind="primary"] { background:linear-gradient(135deg,#425fd6,#5b6fe8); border:none; color:white; box-shadow:0 7px 16px rgba(66,95,214,.20); }
+
+/* Tabs */
+button[data-baseweb="tab"] { border-radius:12px 12px 0 0; padding:.7rem .9rem !important; font-weight:650; }
+button[data-baseweb="tab"][aria-selected="true"] { background:#eef2ff; color:#334bb3; }
+
+/* Alerts */
+[data-testid="stAlert"] { border-radius:14px; }
+
 @media (max-width: 1100px) {
-  .block-container {max-width: 100%; padding-left: 1rem; padding-right: 1rem;}
+  .block-container { max-width:100%; padding-left:1rem; padding-right:1rem; }
+}
+@media (max-width: 720px) {
+  .omt-hero { padding:1.15rem 1.05rem; border-radius:18px; }
+  .omt-stage-row { grid-template-columns:1fr; }
 }
 @media (pointer: coarse) {
-  button, [role="button"] {min-height: 44px;}
-  input, textarea, select {font-size: 16px !important;}
+  button, [role="button"] { min-height:46px; }
+  input, textarea, select { font-size:16px !important; }
 }
 </style>
 """,
@@ -78,6 +175,7 @@ MAX_TOTAL_BYTES = 30 * 1024 * 1024
 
 _MATHIO_RENDER_SEQ = 0
 _mathio_display_component = None
+_mathio_rich_component = None
 
 
 def _strip_math_transport_delimiters(text: str) -> str:
@@ -128,33 +226,35 @@ def _contains_raw_math_source(text: str) -> bool:
 
 
 def render_mathio_mixed(text: str) -> None:
-    r"""Render prose normally and all mathematical fragments through MathIO.
+    r"""Render prose and mathematics together in one natural, inline MathIO view.
 
-    New Gemini responses delimit maths fragments with \(...\) or \[...\].
-    A defensive fallback prevents raw source commands from ever being shown.
+    This avoids the old stacked layout where every symbol/formula became a separate
+    Streamlit row. New Gemini responses delimit maths with \(...\) or \[...\].
     """
     if not text:
         return
-    chunks = _MATHIO_MIXED_PATTERN.split(str(text))
-    for chunk in chunks:
-        if not chunk or not chunk.strip():
-            continue
-        stripped = chunk.strip()
-        is_math = (
-            (stripped.startswith(r"\(") and stripped.endswith(r"\)"))
-            or (stripped.startswith(r"\[") and stripped.endswith(r"\]"))
-            or (stripped.startswith("$$") and stripped.endswith("$$"))
-            or (stripped.startswith("$") and stripped.endswith("$"))
+    value = str(text).strip()
+    if not value:
+        return
+
+    # Preferred path: one browser component lays out prose + inline mathematics as a
+    # single paragraph/card, so expressions such as AB, 40° and tan(theta) stay inline.
+    if _mathio_rich_component is not None and _MATHIO_MIXED_PATTERN.search(value):
+        _mathio_rich_component(
+            data={"text": value},
+            default={},
+            key=_next_mathio_key("mixed:" + value),
+            width="stretch",
+            height="content",
         )
-        if is_math:
-            render_mathio(stripped)
-        elif _contains_raw_math_source(stripped):
-            # Do not leak raw source notation. Treat a source-heavy fragment as maths.
-            # New analyses are prompted to delimit mixed prose correctly, so this is mainly
-            # a compatibility guard for older session content.
-            render_mathio(stripped)
-        else:
-            st.markdown(stripped)
+        return
+
+    # Plain prose remains native Streamlit text. A source-heavy compatibility value from
+    # an older session is rendered as mathematics rather than exposing raw commands.
+    if _contains_raw_math_source(value):
+        render_mathio(value)
+    else:
+        st.markdown(value)
 
 
 def render_math_text(text: str) -> None:
@@ -397,6 +497,110 @@ try:
     )
 except Exception:
     _mathio_display_component = None
+
+
+_MATHIO_RICH_HTML = """
+<div class="omt-rich-math" aria-live="polite"></div>
+"""
+
+_MATHIO_RICH_CSS = """
+.omt-rich-math {
+  width: 100%; color: var(--st-text-color, #172033); line-height: 1.68;
+  font-size: .98rem; overflow-wrap: anywhere;
+}
+.omt-rich-math .omt-rich-paragraph { margin: .15rem 0 .45rem; }
+.omt-rich-math strong { font-weight: 720; }
+.omt-rich-math math-field {
+  display: inline-block; width: auto; min-width: 0; border: 0 !important;
+  outline: 0 !important; background: transparent !important; padding: 0 .03rem;
+  margin: 0 .03rem; color: var(--st-text-color, #172033); font-size: 1.03em;
+  pointer-events: none; vertical-align: -0.12em; --caret-color: transparent;
+  --selection-background-color: transparent;
+}
+.omt-rich-math math-field.omt-display-math {
+  display: block; width: fit-content; max-width: 100%; margin: .42rem 0 .55rem;
+  font-size: 1.12em; overflow-x: auto; vertical-align: baseline;
+}
+@media (pointer: coarse) { .omt-rich-math { font-size: 1rem; } }
+"""
+
+_MATHIO_RICH_JS = f"""
+const MATHLIVE_URL = 'https://cdn.jsdelivr.net/npm/mathlive@{MATHLIVE_VERSION}/+esm';
+
+async function ensureMathLiveForRich() {{
+  if (!customElements.get('math-field')) {{
+    if (!globalThis.__omtMathLivePromise) globalThis.__omtMathLivePromise = import(MATHLIVE_URL);
+    await globalThis.__omtMathLivePromise;
+  }}
+}}
+
+function appendTextWithBold(root, text) {{
+  const bits = String(text || '').split(/(\\*\\*[^*]+\\*\\*)/g);
+  for (const bit of bits) {{
+    if (!bit) continue;
+    if (bit.startsWith('**') && bit.endsWith('**')) {{
+      const strong = document.createElement('strong');
+      strong.textContent = bit.slice(2, -2);
+      root.appendChild(strong);
+    }} else {{
+      const lines = bit.split('\\n');
+      lines.forEach((line, index) => {{
+        if (index) root.appendChild(document.createElement('br'));
+        root.appendChild(document.createTextNode(line));
+      }});
+    }}
+  }}
+}}
+
+function unwrapMath(token) {{
+  if (token.startsWith('\\\\[') && token.endsWith('\\\\]')) return [token.slice(2,-2), true];
+  if (token.startsWith('\\\\(') && token.endsWith('\\\\)')) return [token.slice(2,-2), false];
+  if (token.startsWith('$$') && token.endsWith('$$')) return [token.slice(2,-2), true];
+  if (token.startsWith('$') && token.endsWith('$')) return [token.slice(1,-1), false];
+  return [token, false];
+}}
+
+export default async function(component) {{
+  const {{ parentElement, data }} = component;
+  const root = parentElement.querySelector('.omt-rich-math');
+  root.replaceChildren();
+  try {{
+    await ensureMathLiveForRich();
+    const raw = String(data?.text || '');
+    const pattern = /(\\\\\\[[\\s\\S]*?\\\\\\]|\\\\\\([\\s\\S]*?\\\\\\)|\\$\\$[\\s\\S]*?\\$\\$|\\$[^$\\n]+?\\$)/g;
+    let last = 0;
+    for (const match of raw.matchAll(pattern)) {{
+      appendTextWithBold(root, raw.slice(last, match.index));
+      const [latex, display] = unwrapMath(match[0]);
+      const mf = document.createElement('math-field');
+      mf.value = latex.trim();
+      mf.readOnly = true;
+      mf.setAttribute('read-only', '');
+      mf.setAttribute('virtual-keyboard-mode', 'off');
+      mf.tabIndex = -1;
+      if (display) mf.classList.add('omt-display-math');
+      root.appendChild(mf);
+      last = match.index + match[0].length;
+    }}
+    appendTextWithBold(root, raw.slice(last));
+  }} catch (err) {{
+    const msg = document.createElement('span');
+    msg.textContent = 'Rich equation view could not load. Reload the page to restore the maths display.';
+    msg.style.opacity = '.72'; root.appendChild(msg);
+  }}
+}}
+"""
+
+try:
+    _mathio_rich_component = st.components.v2.component(
+        "omt_rich_math_text",
+        html=_MATHIO_RICH_HTML,
+        css=_MATHIO_RICH_CSS,
+        js=_MATHIO_RICH_JS,
+        isolate_styles=False,
+    )
+except Exception:
+    _mathio_rich_component = None
 
 
 def equation_working_editor(label: str, *, key: str) -> tuple[list[str], list[str]]:
@@ -1580,27 +1784,41 @@ def _render_practice_key_information(items: list[str]) -> None:
     for item in (items or [])[:6]:
         if not str(item).strip():
             continue
-        cols = st.columns([0.035, 0.965])
-        cols[0].markdown("•")
-        with cols[1]:
+        with st.container(border=True):
             render_mathio_mixed(_clean_practice_display_text(str(item)))
 
 
+def _compact_task_prompt(focus_prompt: str, full_question: str) -> str:
+    """Prefer a one-line action prompt even when the model repeats the whole story."""
+    candidate = _clean_practice_display_text(focus_prompt)
+    if candidate and len(candidate) <= 180 and candidate.count("\n") <= 1:
+        return candidate
+    source = _clean_practice_display_text(full_question)
+    # Choose the last sentence/clause that contains an exam-style command.
+    pieces = re.split(r"(?<=[.!?])\s+|\n+", source)
+    commands = re.compile(r"\b(calculate|find|determine|solve|show|state|express|sketch|work out|give|write down)\b", re.I)
+    matches = [piece.strip() for piece in pieces if commands.search(piece)]
+    if matches:
+        return matches[-1][:260].strip()
+    return (candidate or source)[:260].strip()
+
+
 def render_targeted_practice_focus(pq: TargetedPracticeQuestion, *, key: str) -> None:
-    """Show a concise task first and a schematic when the generated question is visual."""
-    focus_prompt = _clean_practice_display_text(getattr(pq, "focus_prompt", "") or "")
+    """Present the task as a compact student card, with visual information before story text."""
     full_question = _clean_practice_display_text(getattr(pq, "question", "") or "")
+    focus_prompt = _compact_task_prompt(getattr(pq, "focus_prompt", "") or "", full_question)
     key_information = list(getattr(pq, "key_information", []) or [])
     diagram = getattr(pq, "diagram_2d", None)
     diagram_note = str(getattr(pq, "diagram_note", "") or "").strip()
 
     with st.container(border=True):
-        st.markdown("#### What you need to do")
+        st.markdown('<div class="omt-focus-title">Your task</div>', unsafe_allow_html=True)
         render_mathio_mixed(focus_prompt or full_question)
 
         if diagram is not None:
-            left, right = st.columns([1.35, 1], vertical_alignment="top")
-            with left:
+            visual_col, info_col = st.columns([1.25, .85], gap="large", vertical_alignment="top")
+            with visual_col:
+                st.caption("Visual model")
                 if _practice_diagram_component is not None:
                     _practice_diagram_component(
                         data={
@@ -1618,16 +1836,23 @@ def render_targeted_practice_focus(pq: TargetedPracticeQuestion, *, key: str) ->
                     )
                 else:
                     st.info("The practice diagram could not load in this browser session.")
-                st.caption(diagram_note or "Schematic only — not drawn to scale.")
-            with right:
+                st.caption(diagram_note or "Schematic only · not drawn to scale")
+            with info_col:
                 if key_information:
-                    st.markdown("**Key information**")
+                    st.caption("Given")
                     _render_practice_key_information(key_information)
         elif key_information:
-            st.markdown("**Key information**")
-            _render_practice_key_information(key_information)
+            st.caption("Given")
+            info_cols = st.columns(2) if len(key_information) > 1 else [st.container()]
+            if len(key_information) > 1:
+                for idx, item in enumerate(key_information[:6]):
+                    with info_cols[idx % 2]:
+                        with st.container(border=True):
+                            render_mathio_mixed(_clean_practice_display_text(str(item)))
+            else:
+                _render_practice_key_information(key_information)
 
-        with st.expander("Show full question"):
+        with st.expander("Full wording", expanded=False):
             render_mathio_mixed(full_question)
 
 
@@ -1814,97 +2039,139 @@ def render_attempt(result: AttemptResult) -> None:
 
 
 def render_ai_analysis(a: GeminiAnalysis) -> None:
-    render_math_text(f"**Interpreted question:** {a.interpreted_question}")
-    st.markdown(f"**Likely syllabus topic:** {a.likely_syllabus_topic}")
-    render_math_text(f"**Method evidenced by the working:** {a.student_method}")
+    st.markdown('<div class="omt-section-kicker">Diagnosis</div>', unsafe_allow_html=True)
+    st.markdown('<div class="omt-section-title">What the student understands — and where the reasoning breaks</div>', unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.caption(a.likely_syllabus_topic)
+        st.markdown("**Question understood as**")
+        render_math_text(a.interpreted_question)
+        st.markdown("**Method shown in the working**")
+        render_math_text(a.student_method)
 
     if a.first_logic_break_step > 0:
-        st.warning(f"First material logic break: step {a.first_logic_break_step}.")
+        st.markdown(
+            f'<div class="omt-logic-break"><strong>First material logic break · Step {a.first_logic_break_step}</strong><br><span style="color:#7c4a10">Repair this point first before continuing.</span></div>',
+            unsafe_allow_html=True,
+        )
         render_math_text(a.first_logic_break_explanation)
     else:
-        st.success("No material logic break was identified.")
+        st.markdown('<div class="omt-success-card"><strong>No material logic break found</strong><br>The visible method is mathematically coherent.</div>', unsafe_allow_html=True)
         if a.first_logic_break_explanation:
             render_math_text(a.first_logic_break_explanation)
 
     if a.steps:
-        st.markdown("### Step-by-step reasoning")
+        st.markdown("### Working, step by step")
         icons = {
-            "correct": "✅",
-            "partly_correct": "🟡",
-            "incorrect": "❌",
-            "unclear": "🔎",
-            "unsupported": "⚪",
+            "correct": "✓",
+            "partly_correct": "◐",
+            "incorrect": "×",
+            "unclear": "?",
+            "unsupported": "•",
+        }
+        labels = {
+            "correct": "Correct",
+            "partly_correct": "Partly correct",
+            "incorrect": "Needs repair",
+            "unclear": "Unclear",
+            "unsupported": "Needs support",
         }
         for step in a.steps:
             presentation_flag = bool(getattr(step, "presentation_error", False))
-            title_icon = "⚠️" if presentation_flag else icons.get(step.status, "•")
-            with st.expander(f"{title_icon} Step {step.line_number}"):
-                st.markdown("**Student step**")
+            icon = "!" if presentation_flag else icons.get(step.status, "•")
+            status_label = "Presentation issue" if presentation_flag else labels.get(step.status, step.status.replace("_", " ").title())
+            with st.expander(f"{icon}  Step {step.line_number} · {status_label}", expanded=(step.line_number == a.first_logic_break_step)):
+                st.caption("Student wrote")
                 render_mathio(step.student_step)
                 if presentation_flag:
-                    st.error("Presentation error — this written line does not form a clear mathematical statement.")
+                    st.warning("This line is not written as a complete, unambiguous mathematical statement.")
                     presentation_explanation = getattr(step, "presentation_error_explanation", "")
                     if presentation_explanation:
                         render_math_text(presentation_explanation)
-                st.markdown("**What the step appears to be doing**")
-                render_mathio_mixed(step.logic_inferred)
-                st.write(f"**Issue type:** {step.issue_type}")
-                render_mathio_mixed(step.feedback)
-                supporting_math = list(getattr(step, "supporting_math", []) or [])
-                for formula in supporting_math:
+                detail_left, detail_right = st.columns([1.1, .9], gap="large")
+                with detail_left:
+                    st.markdown("**What this step is trying to do**")
+                    render_mathio_mixed(step.logic_inferred)
+                with detail_right:
+                    st.markdown("**Tutor feedback**")
+                    render_mathio_mixed(step.feedback)
+                    st.caption(f"Issue type · {step.issue_type.replace('_', ' ').title()}")
+                for formula in list(getattr(step, "supporting_math", []) or []):
                     render_mathio(formula)
 
-    c1, c2 = st.columns(2)
+    c1, c2 = st.columns(2, gap="large")
     with c1:
-        st.markdown("### Strengths")
-        for item in a.strengths:
-            render_math_text(f"• {item}")
+        with st.container(border=True):
+            st.markdown("### ✓ What is working")
+            if a.strengths:
+                for item in a.strengths:
+                    render_math_text(f"• {item}")
+            else:
+                st.caption("No specific strength was identified from the visible work.")
     with c2:
-        st.markdown("### Main gap to repair")
-        render_math_text(a.misconception_or_gap)
-        render_math_text(f"**Diagnostic question:** {a.diagnostic_question}")
+        with st.container(border=True):
+            st.markdown("### → Main repair focus")
+            render_math_text(a.misconception_or_gap)
+            st.markdown("**Check your thinking**")
+            render_math_text(a.diagnostic_question)
 
-    st.markdown("### Guided correction")
-    for i, hint in enumerate(a.hint_ladder, 1):
-        with st.expander(f"Hint {i}"):
-            render_mathio_mixed(hint)
-    with st.expander("Reveal corrected path and answer"):
+    st.markdown("### Guided repair")
+    st.caption("Reveal only as much help as the student needs.")
+    hint_cols = st.columns(3)
+    for i, hint in enumerate(a.hint_ladder[:3], 1):
+        with hint_cols[i - 1]:
+            with st.expander(f"Hint {i}"):
+                render_mathio_mixed(hint)
+    with st.expander("Show corrected path and final answer"):
         for i, line in enumerate(a.corrected_path, 1):
-            st.caption(f"Step {i}")
+            st.caption(f"Corrected step {i}")
             render_mathio(line)
         st.markdown("**Final answer**")
         render_mathio(a.final_answer)
 
 
 def render_practice_evaluation(e: PracticeEvaluation) -> None:
+    st.markdown("### Attempt feedback")
     c1, c2, c3 = st.columns(3)
     c1.metric("Answer", f"{e.answer_score}%")
     c2.metric("Reasoning", f"{e.reasoning_score}%")
     c3.metric("Mastery", e.mastery)
-    render_math_text(e.summary)
+
+    with st.container(border=True):
+        render_math_text(e.summary)
+
     if e.first_logic_break_step > 0:
-        st.warning(f"First logic break: step {e.first_logic_break_step}.")
+        st.markdown(
+            f'<div class="omt-logic-break"><strong>First reasoning break · Step {e.first_logic_break_step}</strong></div>',
+            unsafe_allow_html=True,
+        )
         render_math_text(e.first_logic_break_explanation)
-    if e.strengths:
-        st.markdown("**Strengths**")
-        for item in e.strengths:
-            render_math_text(f"• {item}")
-    if e.missing_or_incorrect_parts:
-        st.warning("Parts still to complete correctly: " + ", ".join(e.missing_or_incorrect_parts))
-    presentation_errors = list(getattr(e, "presentation_errors", []) or [])
-    if presentation_errors:
-        st.markdown("**Presentation errors**")
-        for item in presentation_errors:
-            st.warning("Presentation issue detected in the student's working.")
-            render_mathio_mixed(item)
-    if e.gaps:
-        st.markdown("**Gaps**")
-        for item in e.gaps:
-            render_math_text(f"• {item}")
-    st.markdown("**Next hint:**")
-    render_mathio_mixed(e.next_hint)
-    st.markdown("**Corrected next step**")
-    render_mathio(e.corrected_next_step)
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        with st.container(border=True):
+            st.markdown("**✓ Strengths**")
+            if e.strengths:
+                for item in e.strengths:
+                    render_math_text(f"• {item}")
+            else:
+                st.caption("No secure strength identified yet.")
+    with right:
+        with st.container(border=True):
+            st.markdown("**→ Repair next**")
+            if e.missing_or_incorrect_parts:
+                st.warning("Complete: " + ", ".join(e.missing_or_incorrect_parts))
+            presentation_errors = list(getattr(e, "presentation_errors", []) or [])
+            for item in presentation_errors:
+                render_mathio_mixed(item)
+            if e.gaps:
+                for item in e.gaps:
+                    render_math_text(f"• {item}")
+
+    with st.expander("Next hint", expanded=False):
+        render_mathio_mixed(e.next_hint)
+    with st.expander("Show corrected next step", expanded=False):
+        render_mathio(e.corrected_next_step)
 
 
 def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:
@@ -2119,46 +2386,46 @@ def render_question_feasibility(result: QuestionFeasibilityResult, question_file
     }
     message = labels.get(result.status, result.status.replace("_", " ").title())
     if result.status == "feasible":
-        st.success(f"Question feasibility: {message}.")
+        st.markdown(f'<div class="omt-success-card"><strong>✓ {message}</strong><br>The question is sufficiently clear and consistent for reasoning analysis.</div>', unsafe_allow_html=True)
     elif result.status == "feasible_with_caveats":
-        st.warning(f"Question feasibility: {message}.")
+        st.warning(f"{message} — review the note below before marking.")
     else:
-        st.error(f"Question feasibility: {message}. Student-working analysis is blocked until the question is clarified or corrected.")
+        st.error(f"{message} — student-working analysis stays locked until the question is clarified or corrected.")
 
-    render_math_text(f"**Interpreted question:** {result.interpreted_question}")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Answerability", result.answerability.replace("_", " ").title())
-    c2.metric("Information", "Complete" if result.required_information_present else "Missing / unclear")
-    c3.metric("Diagram / table", "Sufficient" if result.diagram_or_table_sufficient else "Needs attention")
-    st.caption(
-        f"Syllabus fit: {result.syllabus_fit.replace('_', ' ').title()} · "
-        f"Feasibility confidence: {result.confidence.title()}"
-    )
+    with st.container(border=True):
+        st.caption("Question interpreted as")
+        render_math_text(result.interpreted_question)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Answerability", result.answerability.replace("_", " ").title())
+        c2.metric("Information", "Complete" if result.required_information_present else "Needs attention")
+        c3.metric("Diagram / table", "Sufficient" if result.diagram_or_table_sufficient else "Needs attention")
+        st.caption(
+            f"Syllabus fit · {result.syllabus_fit.replace('_', ' ').title()}    |    "
+            f"Confidence · {result.confidence.title()}"
+        )
 
     render_feasibility_visual_map(result, question_files)
 
     if result.issues:
-        st.markdown("**Question issues / warnings**")
+        st.markdown("### Issues to check")
         for issue_number, issue in enumerate(result.issues, 1):
-            label = "Blocking" if issue.severity == "blocking" else "Warning"
-            visual_note = ""
-            if list(getattr(issue, "visual_regions", []) or []):
-                visual_note = f" · see diagram callout {issue_number}"
-            if issue.severity == "blocking":
-                st.error(f"{label}{visual_note}")
-            else:
-                st.warning(f"{label}{visual_note}")
-            render_mathio_mixed(issue.description)
-            if issue.suggested_fix:
-                render_math_text(f"**Suggested clarification/fix:** {issue.suggested_fix}")
+            label = "Blocking issue" if issue.severity == "blocking" else "Warning"
+            visual_note = f" · diagram {issue_number}" if list(getattr(issue, "visual_regions", []) or []) else ""
+            with st.container(border=True):
+                st.markdown(f"**{label}{visual_note}**")
+                render_mathio_mixed(issue.description)
+                if issue.suggested_fix:
+                    st.caption("Suggested fix")
+                    render_math_text(issue.suggested_fix)
 
     if result.suspected_corrections:
-        st.markdown("**Possible corrections to verify**")
-        for item in result.suspected_corrections:
-            render_math_text(f"• {item}")
+        with st.expander("Possible corrections to verify"):
+            for item in result.suspected_corrections:
+                render_math_text(f"• {item}")
 
     if result.action_needed:
-        render_math_text(f"**Next action:** {result.action_needed}")
+        st.markdown("**Next action**")
+        render_math_text(result.action_needed)
 
 
 def offline_evidence_for(question_text: str, working_text: str) -> tuple[str, AttemptResult | None]:
@@ -2179,91 +2446,127 @@ def offline_evidence_for(question_text: str, working_text: str) -> tuple[str, At
 
 # ---------- Sidebar ----------
 with st.sidebar:
-    st.title("🇸🇬 Math Reasoning Tutor")
-    st.caption("Singapore O/N-Level tutor with Gemini online analysis plus a no-credit offline fallback.")
+    st.markdown(
+        """
+        <div class="omt-side-brand">
+          <div class="title">✦ SG Math Tutor</div>
+          <div class="sub">Reasoning-first support for Singapore O-Level and N-Level Mathematics.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     track_label = st.selectbox("Exam track", list(TRACKS.keys()), index=0)
     tcode = track_code(track_label)
-
-    st.markdown("---")
-    st.markdown("**2026 syllabus mode**")
-    if tcode == "O":
-        st.caption("GCE O-Level Mathematics, syllabus 4052")
-    elif tcode == "NA":
-        st.caption("GCE N(A)-Level Mathematics Syllabus A, syllabus 4045")
-    else:
-        st.caption("GCE N(T)-Level Mathematics Syllabus T, syllabus 4046")
-
-    st.markdown("---")
-    st.markdown("**Gemini online mode**")
-    explicit_key = st.text_input(
-        "Gemini API key (optional here)",
-        type="password",
-        help="Prefer Streamlit Community Cloud Secrets with the name GEMINI_API_KEY. Leave this blank when the secret is configured.",
+    syllabus_name = (
+        "O-Level Mathematics · 4052" if tcode == "O"
+        else "N(A)-Level Mathematics A · 4045" if tcode == "NA"
+        else "N(T)-Level Mathematics T · 4046"
     )
-    has_key = bool(get_api_key(explicit_key))
+    st.markdown(f'<div class="omt-status-pill neutral">📘 <span>{syllabus_name}</span></div>', unsafe_allow_html=True)
+
+    with st.expander("⚙️ Gemini connection", expanded=False):
+        explicit_key = st.text_input(
+            "Gemini API key (optional here)",
+            type="password",
+            help="Prefer Streamlit Community Cloud Secrets with the name GEMINI_API_KEY.",
+        )
+        has_key = bool(get_api_key(explicit_key))
+        model = st.selectbox(
+            "Gemini model",
+            ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
+            index=0,
+            help="Free-tier availability and quotas depend on the Google account/project.",
+        )
     if has_key:
-        st.success("Gemini key detected")
+        st.markdown('<div class="omt-status-pill good">● <span>Gemini online</span></div>', unsafe_allow_html=True)
     else:
-        st.info("No Gemini key detected — offline modes still work")
-    model = st.selectbox(
-        "Gemini model",
-        ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
-        index=0,
-        help="Flash-Lite is intended for lower-cost/high-volume multimodal work. Free-tier availability and quotas depend on the Google account/project.",
-    )
+        st.markdown('<div class="omt-status-pill neutral">○ <span>Offline tools available</span></div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.caption(
-        "Online mode sends the submitted question/work to Google Gemini. Offline practice and typed-algebra checking do not call Gemini."
-    )
-    if st.button("Reset learning session", use_container_width=True):
+    with st.expander("Privacy & data", expanded=False):
+        st.caption(
+            "Online analysis sends only the selected question/work to Gemini. Remove names, NRICs and unnecessary identifiers. "
+            "Offline practice and typed-algebra checking do not call Gemini."
+        )
+
+    if st.button("↻ Reset learning session", use_container_width=True):
         for key in list(st.session_state.keys()):
             if key not in {"session_id"}:
                 del st.session_state[key]
         st.rerun()
 
 
-st.title("Singapore O-Level & N-Level Mathematics Tutor")
-st.write(
-    "Use **Gemini online analysis** for uploaded/handwritten work and complex questions, with automatic question detection and a visual equation editor. "
-    "If Gemini is unavailable or its free quota is reached, the **offline practice and algebra checker remain usable**."
+st.markdown(
+    """
+    <section class="omt-hero">
+      <div class="omt-eyebrow">Singapore secondary mathematics</div>
+      <h1>Reasoning Tutor</h1>
+      <p>Understand the student's method, find the first reasoning break, repair it visually, then build mastery through adaptive practice.</p>
+      <div class="omt-chip-row">
+        <span class="omt-chip">✍️ Handwriting & iPad</span>
+        <span class="omt-chip">∑ MathIO equation view</span>
+        <span class="omt-chip">◫ Visual geometry</span>
+        <span class="omt-chip">↗ Adaptive mastery</span>
+      </div>
+    </section>
+    """,
+    unsafe_allow_html=True,
 )
 
 ai_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
     [
-        "1 · Gemini analyse work",
-        "2 · Offline practice",
-        "3 · Offline algebra check",
-        "4 · Syllabus coverage",
-        "5 · Progress",
+        "✨ Analyse",
+        "🧠 Offline practice",
+        "✎ Algebra check",
+        "📚 Syllabus",
+        "📈 Progress",
     ]
 )
 
 # ---------- Gemini online analysis ----------
 with ai_tab:
-    st.subheader("Analyse a student's question and working")
-    st.write(
-        "Type the question/working, upload images or PDFs, or combine both. Gemini is used for flexible interpretation; "
-        "for supported typed algebra, the deterministic offline checker is also passed in as verification evidence."
-    )
-    st.warning(
-        "Privacy: Gemini Free Tier terms can differ from paid API terms, including how submitted content may be used. "
-        "Do not upload student names, NRICs, school identifiers, or other unnecessary personal data. Use this only where your school/guardian policy permits it."
+    st.markdown('<div class="omt-section-kicker">Step 1 · Submit</div>', unsafe_allow_html=True)
+    st.markdown('<div class="omt-section-title">Question + student working</div>', unsafe_allow_html=True)
+    st.markdown(
+        "<div class='omt-section-copy'>Upload a photo/PDF or type the question, then add the student's working. The tutor keeps the question and solution separate during diagnosis.</div>",
+        unsafe_allow_html=True,
     )
 
-    q_text = st.text_area(
-        "Question text",
-        key="ai_question_text",
-        height=120,
-        placeholder="Type the question here, or leave blank if it is fully visible in the uploaded file.",
-    )
-    q_files = st.file_uploader(
-        "Question image/PDF (optional)",
-        type=["png", "jpg", "jpeg", "webp", "pdf"],
-        accept_multiple_files=True,
-        key="ai_question_files",
-    )
+    input_left, input_right = st.columns([.95, 1.05], gap="large")
+    with input_left:
+        with st.container(border=True):
+            st.markdown("#### 📄 Question")
+            q_text = st.text_area(
+                "Question text",
+                key="ai_question_text",
+                height=132,
+                placeholder="Type the question here, or leave blank if it is visible in the upload.",
+                label_visibility="collapsed",
+            )
+            q_files = st.file_uploader(
+                "Upload question image/PDF",
+                type=["png", "jpg", "jpeg", "webp", "pdf"],
+                accept_multiple_files=True,
+                key="ai_question_files",
+                help="Photos, screenshots and PDFs are supported.",
+            )
+
+    with input_right:
+        with st.container(border=True):
+            st.markdown("#### ✍️ Student working")
+            w_text, w_input_mode, w_offline_text = working_input(
+                "Student working",
+                text_key="ai_working_text",
+                format_key="ai_working_format",
+                height=160,
+                plain_placeholder="Type the steps, use the equation editor, or leave blank when the working is uploaded.",
+            )
+            w_files = st.file_uploader(
+                "Upload student working image/PDF",
+                type=["png", "jpg", "jpeg", "webp", "pdf"],
+                accept_multiple_files=True,
+                key="ai_working_files",
+            )
 
     # Clear stale detection results when the uploaded source changes.
     current_signature = question_file_signature(q_files)
@@ -2282,23 +2585,10 @@ with ai_tab:
         clear_ai_practice_state()
         st.session_state.pop("ai_detected_question_selector", None)
 
-    w_text, w_input_mode, w_offline_text = working_input(
-        "Student working",
-        text_key="ai_working_text",
-        format_key="ai_working_format",
-        height=190,
-        plain_placeholder="Type the student's steps here, use the equation editor, or leave blank if the working is in the uploaded file.",
-    )
-    w_files = st.file_uploader(
-        "Student working image/PDF (optional)",
-        type=["png", "jpg", "jpeg", "webp", "pdf"],
-        accept_multiple_files=True,
-        key="ai_working_files",
-    )
-
     consent = st.checkbox(
-        "I understand that Gemini features send the selected inputs to Google's Gemini API.",
+        "Allow Gemini to analyse the selected question and working",
         key="gemini_consent",
+        help="Remove names, NRICs and other unnecessary personal identifiers before sending student work.",
     )
 
     selected_detection_index = 0
@@ -2491,14 +2781,11 @@ with ai_tab:
         elif st.session_state.ai_visual_error:
             st.caption("Interactive visual explanation unavailable for this attempt: " + st.session_state.ai_visual_error)
         st.markdown("---")
-        st.markdown("## Adaptive targeted practice")
-        st.write(
-            "Practice is now mastery-gated: the student works through **Near transfer → Varied context → Stretch** in order. "
-            "If a category is not secure, the tutor stays there and generates more questions targeting the same gap."
-        )
-        st.caption(
-            "Mastery rule: a secure first attempt unlocks the next category. After any miss in a category, "
-            "the student must produce two consecutive secure attempts before moving on."
+        st.markdown('<div class="omt-section-kicker">Adaptive practice</div>', unsafe_allow_html=True)
+        st.markdown('<div class="omt-section-title">Build mastery one transfer level at a time</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="omt-section-copy">Near transfer → Varied context → Stretch. A mistake keeps the student on the same skill until the reasoning becomes secure.</div>',
+            unsafe_allow_html=True,
         )
 
         if st.session_state.ai_practice_current_question is None and not st.session_state.ai_practice_finished:
@@ -2506,19 +2793,18 @@ with ai_tab:
 
         stage_index = int(st.session_state.ai_practice_stage)
         completed = st.session_state.ai_practice_completed
-        status_cols = st.columns(3)
+        stage_html = []
         for i, kind in enumerate(PRACTICE_STAGES):
             if completed.get(kind):
-                label = f"✅ {kind}"
-                detail = "Mastered"
+                css = "done"; icon = "✓"; detail = "Mastered"
             elif not st.session_state.ai_practice_finished and i == stage_index:
-                label = f"🟠 {kind}"
-                detail = "Current focus"
+                css = "current"; icon = "●"; detail = "Current focus"
             else:
-                label = f"🔒 {kind}"
-                detail = "Locked"
-            status_cols[i].markdown(f"**{label}**")
-            status_cols[i].caption(detail)
+                css = "locked"; icon = "◌"; detail = "Locked"
+            stage_html.append(
+                f'<div class="omt-stage {css}"><div class="name">{icon} {kind.title()}</div><div class="detail">{detail}</div></div>'
+            )
+        st.markdown('<div class="omt-stage-row">' + ''.join(stage_html) + '</div>', unsafe_allow_html=True)
 
         if st.session_state.ai_practice_finished:
             st.success(
@@ -2531,7 +2817,7 @@ with ai_tab:
             misses = st.session_state.ai_practice_misses[kind]
             streak = st.session_state.ai_practice_consecutive_correct[kind]
 
-            st.markdown(f"### Current focus: {kind}")
+            st.markdown(f'<div class="omt-section-kicker">Current focus</div><div class="omt-section-title">{kind.title()}</div>', unsafe_allow_html=True)
             if misses:
                 st.warning(
                     f"This category remains active because the student has had {misses} non-secure attempt(s). "
@@ -2541,7 +2827,7 @@ with ai_tab:
                 pq,
                 key=f"{stage_index}_{st.session_state.ai_practice_question_version}",
             )
-            st.caption("Focus skill")
+            st.caption("Skill being checked")
             render_mathio_mixed(_clean_practice_display_text(pq.target_skill))
             required_parts = required_parts_for_question(pq)
             if required_parts != ["whole question"]:

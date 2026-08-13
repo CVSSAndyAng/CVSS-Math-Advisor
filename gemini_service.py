@@ -416,7 +416,7 @@ class TargetedPracticeQuestion(BaseModel):
     question: str = Field(description=r"Complete student-facing question prose. Wrap every mathematical expression in \( ... \) or \[ ... \] transport delimiters for MathIO rendering. Do not use Markdown bold markers.")
     focus_prompt: str = Field(
         default="",
-        description=r"One short student-facing sentence stating exactly what must be found or shown. Keep the story/context out. Wrap mathematics in \( ... \) transport delimiters.",
+        description=r"A single action sentence, ideally 6 to 16 words, stating only what the student must find/show. Do not repeat givens or story context. Wrap mathematics in \( ... \) transport delimiters.",
     )
     key_information: list[str] = Field(
         default_factory=list,
@@ -595,7 +595,7 @@ SAFETY AND RELIABILITY
 - A different valid method is acceptable.
 - Provide exactly three targeted practice questions: Near transfer, Varied context, and Stretch.
 - Each practice question must be original, solvable, syllabus-appropriate, and have a verified answer and worked solution.
-- PRACTICE FOCUS UI: populate focus_prompt with one short sentence saying exactly what the student must find/show, and key_information with 2 to 5 concise givens. Do not repeat the full story in focus_prompt.
+- PRACTICE FOCUS UI: focus_prompt must be ONE short action sentence (ideally 6-16 words) containing only what the student must find/show. Put every given value/condition in key_information instead. Never repeat the story or givens in focus_prompt. key_information must contain 2 to 5 atomic, concise givens.
 - For geometry, trigonometry, coordinate geometry, bearings, transformations, or graph questions, populate diagram_2d with a simple teaching schematic. Use points/segments/angles/circles/polylines only from information explicitly given in the question. Do NOT include answer-derived lengths, coordinates, angles, or construction results. Set show_axes=true for graph/coordinate questions where axes help. For non-visual questions use diagram_2d=null.
 - A trigonometry/elevation/depression schematic should clearly show the horizontal/vertical reference lines, named points, line(s) of sight, and the GIVEN angle labels, while remaining explicitly not to scale.
 - Avoid Markdown emphasis such as **...** in practice question fields; the app controls presentation.
@@ -1369,7 +1369,7 @@ ADAPTIVE RULES
 - Keep it appropriate to the selected Singapore O-Level / N-Level track.
 - Independently verify the mathematics.
 - Include exactly three progressive hints.
-- Populate focus_prompt with one concise instruction and key_information with 2 to 5 givens so the practice screen can stay compact.
+- Populate focus_prompt with ONE short action sentence (ideally 6-16 words) containing only the task. Put all givens in 2 to 5 atomic key_information items. Never repeat the story in focus_prompt.
 - For geometry, trigonometry, coordinate geometry, bearings, transformations, or graph questions, populate diagram_2d with a simple schematic using only the givens in the new question. Do not include answer-derived information. Use null for non-visual questions.
 - Avoid Markdown emphasis such as **...** in student-facing practice fields.
 - Populate required_parts with every part the student must complete. Use ["whole question"] for a single-part question.
