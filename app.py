@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import secrets
 from io import BytesIO
 from collections import Counter
@@ -109,6 +110,39 @@ def _mathio_latex(text: str) -> str:
 def render_mathio(text: str) -> None:
     """Render reference mathematics in MathIO/equation view."""
     st.latex(_mathio_latex(text))
+
+
+_MATHIO_MIXED_PATTERN = re.compile(
+    r"(\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$\$[\s\S]*?\$\$|\$[^$\n]+?\$)"
+)
+
+
+def render_mathio_mixed(text: str) -> None:
+    """Render prose normally and every delimited maths fragment in equation view.
+
+    Gemini prose fields use ``\\(...\\)`` / ``\\[...\\]`` around mathematics.
+    This renderer strips those transport delimiters and sends only the mathematical
+    fragment to ``st.latex`` so students never see raw LaTeX commands.
+    """
+    if not text:
+        return
+    chunks = _MATHIO_MIXED_PATTERN.split(str(text))
+    for chunk in chunks:
+        if not chunk:
+            continue
+        stripped = chunk.strip()
+        if not stripped:
+            continue
+        is_math = (
+            (stripped.startswith(r"\(") and stripped.endswith(r"\)"))
+            or (stripped.startswith(r"\[") and stripped.endswith(r"\]"))
+            or (stripped.startswith("$$") and stripped.endswith("$$"))
+            or (stripped.startswith("$") and stripped.endswith("$"))
+        )
+        if is_math:
+            st.latex(_mathio_latex(stripped))
+        else:
+            st.markdown(stripped)
 
 
 MATHLIVE_VERSION = "0.110.0"  # Patched MathLive release used by the visual equation editor.
@@ -625,7 +659,7 @@ _VISUAL_2D_CSS = """
 """
 
 _VISUAL_2D_JS = r"""
-const JXG_URL = 'https://cdn.jsdelivr.net/npm/jsxgraph@2.4.0/distrib/jsxgraphcore.mjs';
+const JXG_URL = 'https://cdn.jsdelivr.net/npm/jsxgraph@1.12.2/distrib/jsxgraphcore.mjs';
 
 async function loadJXG() {
   if (!globalThis.__omtJXGPromise) globalThis.__omtJXGPromise = import(JXG_URL);
@@ -650,7 +684,7 @@ export default async function(component) {
   const highlight = new Set(step.highlight_ids || []);
   const dim = new Set(step.dim_ids || []);
   let JXG;
-  try { JXG = await loadJXG(); } catch (err) { stage.textContent = 'Interactive 2D visual could not load.'; return; }
+  try { JXG = await loadJXG(); } catch (err) { console.error('JSXGraph load failed', err); stage.textContent = 'Interactive 2D visual could not load. Reload once; if this persists, the JSXGraph library may be blocked by the network.'; return; }
 
   try { if (parentElement.__omtBoard) JXG.JSXGraph.freeBoard(parentElement.__omtBoard); } catch (_) {}
   stage.replaceChildren();
@@ -1101,7 +1135,8 @@ def render_attempt(result: AttemptResult) -> None:
         st.markdown("**What to repair**")
         for item in result.gaps:
             st.write(f"• {item}")
-    st.markdown(f"**Next hint:** {result.next_hint}")
+    st.markdown("**Next hint:**")
+    render_mathio_mixed(result.next_hint)
 
 
 def render_ai_analysis(a: GeminiAnalysis) -> None:
@@ -1157,7 +1192,7 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
     st.markdown("### Guided correction")
     for i, hint in enumerate(a.hint_ladder, 1):
         with st.expander(f"Hint {i}"):
-            render_math_text(hint)
+            render_mathio_mixed(hint)
     with st.expander("Reveal corrected path and answer"):
         for i, line in enumerate(a.corrected_path, 1):
             st.caption(f"Step {i}")
@@ -1190,7 +1225,8 @@ def render_practice_evaluation(e: PracticeEvaluation) -> None:
         st.markdown("**Gaps**")
         for item in e.gaps:
             render_math_text(f"• {item}")
-    render_math_text(f"**Next hint:** {e.next_hint}")
+    st.markdown("**Next hint:**")
+    render_mathio_mixed(e.next_hint)
     st.markdown("**Corrected next step**")
     render_mathio(e.corrected_next_step)
 
@@ -1833,7 +1869,8 @@ with ai_tab:
             render_math_text(pq.why_this_tests_understanding)
             with st.expander("Practice hints"):
                 for i, hint in enumerate(pq.hints, 1):
-                    render_math_text(f"**Hint {i}:** {hint}")
+                    st.markdown(f"**Hint {i}:**")
+                    render_mathio_mixed(hint)
 
             working_key = f"ai_practice_working_{stage_index}_{st.session_state.ai_practice_question_version}"
             attempt, practice_input_mode, _practice_offline_text, practice_assets = targeted_practice_input(
@@ -1975,7 +2012,8 @@ with practice_tab:
         if st.button("Show next hint", key="show_hint"):
             st.session_state.hint_level = min(len(question.hints), st.session_state.hint_level + 1)
         for i in range(st.session_state.hint_level):
-            st.markdown(f"**Hint {i+1}:** {question.hints[i]}")
+            st.markdown(f"**Hint {i+1}:**")
+            render_mathio_mixed(question.hints[i])
         if st.session_state.hint_level == 0:
             st.caption("Try the question before revealing a hint.")
 
