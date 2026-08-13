@@ -210,11 +210,60 @@ class VisualAngle3D(BaseModel):
     label: str = ""
 
 
+class VisualBox3D(BaseModel):
+    id: str
+    center: list[float] = Field(min_length=3, max_length=3, description="[x,y,z] centre")
+    width: float = Field(gt=0)
+    height: float = Field(gt=0)
+    depth: float = Field(gt=0)
+    rotation: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3, description="Euler rotation [rx,ry,rz] in radians")
+    label: str = ""
+
+
+class VisualCylinder3D(BaseModel):
+    id: str
+    center: list[float] = Field(min_length=3, max_length=3)
+    radius: float = Field(gt=0)
+    height: float = Field(gt=0)
+    axis: Literal["x", "y", "z"] = "y"
+    label: str = ""
+
+
+class VisualCone3D(BaseModel):
+    id: str
+    center: list[float] = Field(min_length=3, max_length=3)
+    radius: float = Field(gt=0)
+    height: float = Field(gt=0)
+    axis: Literal["x", "y", "z"] = "y"
+    label: str = ""
+
+
+class VisualSphere3D(BaseModel):
+    id: str
+    center: list[float] = Field(min_length=3, max_length=3)
+    radius: float = Field(gt=0)
+    label: str = ""
+
+
+class VisualExtrusion3D(BaseModel):
+    id: str
+    profile: list[list[float]] = Field(min_length=3, description="Closed 2D polygon profile as local [u,v] points; do not repeat the first point")
+    depth: float = Field(gt=0, description="Extrusion depth")
+    center: list[float] = Field(min_length=3, max_length=3, description="[x,y,z] centre of the completed extrusion")
+    axis: Literal["x", "y", "z"] = "z"
+    label: str = ""
+
+
 class VisualScene3D(BaseModel):
     vertices: list[VisualVertex3D] = Field(default_factory=list)
     edges: list[VisualEdge3D] = Field(default_factory=list)
     faces: list[VisualFace3D] = Field(default_factory=list)
     angles: list[VisualAngle3D] = Field(default_factory=list)
+    boxes: list[VisualBox3D] = Field(default_factory=list, description="Cuboids/rectangular blocks")
+    cylinders: list[VisualCylinder3D] = Field(default_factory=list)
+    cones: list[VisualCone3D] = Field(default_factory=list)
+    spheres: list[VisualSphere3D] = Field(default_factory=list)
+    extrusions: list[VisualExtrusion3D] = Field(default_factory=list, description="Prisms such as triangular/trapezoidal prisms represented by an extruded polygon profile")
 
 
 class VisualExplanationStep(BaseModel):
@@ -265,6 +314,10 @@ class VisualExplanationResult(BaseModel):
     reconstruction_confidence: Literal["high", "medium", "low"]
     reconstruction_note: str = Field(
         description="State what was reconstructed from the question and whether the drawing is schematic/not to scale."
+    )
+    reconstructed_parts: list[str] = Field(
+        default_factory=list,
+        description="For 3D questions, short student-facing inventory of physical components reconstructed from the source, e.g. trapezoidal prism base, vertical cylinder, top cuboid block.",
     )
     steps: list[VisualExplanationStep] = Field(default_factory=list)
     scene_2d: VisualScene2D | None = None
@@ -734,6 +787,21 @@ def _sanitize_visual_explanation(result: VisualExplanationResult) -> VisualExpla
         valid_ids.update(x.id for x in scene.edges)
         valid_ids.update(x.id for x in scene.faces)
         valid_ids.update(x.id for x in scene.angles)
+        valid_ids.update(x.id for x in scene.boxes)
+        valid_ids.update(x.id for x in scene.cylinders)
+        valid_ids.update(x.id for x in scene.cones)
+        valid_ids.update(x.id for x in scene.spheres)
+        valid_ids.update(x.id for x in scene.extrusions)
+        solid_count = len(scene.boxes) + len(scene.cylinders) + len(scene.cones) + len(scene.spheres) + len(scene.extrusions)
+        physical_words = " ".join(result.reconstructed_parts + [result.reconstruction_note, result.title]).lower()
+        if solid_count == 0 and any(word in physical_words for word in ("cuboid", "block", "cylinder", "cone", "sphere", "prism", "composite solid")):
+            result.mode = "none"
+            result.scene_3d = None
+            result.reconstruction_note = (
+                result.reconstruction_note
+                + " A reliable solid-body reconstruction could not be formed from the source, so the tutor has hidden the point-only 3D view rather than showing a misleading model."
+            ).strip()
+            return result
     else:
         result.scene_2d = None
         result.scene_3d = None
@@ -855,7 +923,12 @@ RECONSTRUCTION SAFETY
 - If reconstruction confidence would be low, return mode="none". A polished but wrong diagram is worse than no diagram.
 - A schematic geometry drawing may use convenient coordinates that are NOT to scale, provided incidences and stated relationships are preserved. Say this in reconstruction_note.
 - For coordinate graphs, use the actual coordinates/scales from the question where known.
-- For 3D solids, choose a simple internally consistent coordinate model that preserves the named vertices/edges/faces and stated lengths/angles. Do not imply unstated lengths are exact.
+- For 3D solids, first reconstruct the PHYSICAL FORM of the object, not merely its labelled vertices. Identify every component solid visible/stated in the question (for example cuboid, cylinder, cone, triangular prism, trapezoidal prism, pyramid/sphere-like part).
+- If the question provides front/top/side or other orthographic views, treat them as views of ONE object. Match shared dimensions and component positions across views before building the 3D scene.
+- Preserve every stated dimension and ratio. NEVER invent a numerical dimension just to make the model look attractive. If some dimensions are not given, use a schematic normalized dimension only for visual placement and explicitly say which proportions are schematic in reconstruction_note.
+- Use scene_3d.boxes for cuboids, cylinders for cylindrical parts, cones for cones, spheres for spherical parts, and extrusions for triangular/trapezoidal/other constant-cross-section prisms. Use vertices/edges/faces mainly for named points, mathematical construction lines, sections, diagonals and angle overlays.
+- A composite-solid/volume question in geometry3d should normally contain at least one solid primitive (box/cylinder/cone/sphere/extrusion), not only isolated vertices and line segments.
+- For 3D solids, choose an internally consistent coordinate model that preserves named vertices/edges/faces, stated component relationships, and stated lengths/angles. Do not imply unstated lengths are exact.
 
 VISUAL DATA RULES
 - Return ONLY declarative primitives from the schema. Do not return HTML, JavaScript, executable expressions, URLs, or code.
@@ -864,6 +937,8 @@ VISUAL DATA RULES
 - For graph curves use VisualPolyline2D.points as numeric [x,y] samples. Never return an executable function string.
 - Keep scenes modest: usually <= 20 points/vertices and <= 35 other primitives.
 - In 3D include visible structural edges. Include faces only when they help orient the student.
+- Populate reconstructed_parts with the component inventory inferred from the source image/question so the student can verify what the tutor believes the object contains.
+- For a composite solid, keep the complete physical object visible from the first visual step for orientation; use highlight_ids/dim_ids to focus on the component used by the current corrected solution step. Reveal auxiliary diagonals, sections and construction geometry progressively.
 
 STEP-BY-STEP PEDAGOGY — STRICT ALIGNMENT
 - The corrected solution steps above are canonical. The visual explanation MUST follow them in exactly the same order.
@@ -888,8 +963,10 @@ STEP-BY-STEP PEDAGOGY — STRICT ALIGNMENT
 - Explanations must be concise and student-friendly. Put any mathematical expressions in \( ... \) transport delimiters for MathIO rendering.
 
 3D-SPECIFIC TEACHING
+- The first visual state must look recognisably like the physical solid in the question. A cloud of labelled points is not acceptable for a composite 3D solid.
+- For composite volume/surface-area questions, show the assembled solid, then visually isolate/highlight the exact component being calculated at each corrected step (base prism, cylinder, top block, etc.), then reunite/highlight the final total.
 - For a 3D angle/length question, explicitly reveal the 2D triangle or cross-section inside the solid before applying trigonometry or Pythagoras.
-- Use reveal_ids so that diagonal/cross-section edges appear only when the matching corrected step needs them, and animate_ids so those edges visibly grow into place.
+- Use reveal_ids so that auxiliary diagonal/cross-section edges appear only when the matching corrected step needs them, and animate_ids so those edges visibly grow into place. Physical solid components may remain visible throughout and be dimmed when not in focus.
 - Use dim_ids to fade unrelated edges and highlight the exact edges forming that triangle.
 - If a space diagonal is needed, show how it is obtained from a face/base diagonal first when appropriate.
 - If camera_position/camera_target changes between steps, the app may animate the camera transition so the student sees how the relevant plane or angle is located in the solid.

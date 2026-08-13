@@ -907,7 +907,7 @@ export default async function(component) {
 _VISUAL_3D_HTML = """
 <div class="omt-visual3d-shell">
   <div class="omt-visual3d-stage"></div>
-  <div class="omt-visual-help">Drag with one finger to rotate. Pinch with two fingers to zoom. The highlighted edges/angles are the ones used in this step.</div>
+  <div class="omt-visual-help">Drag with one finger to rotate. Pinch with two fingers to zoom. The solid is reconstructed from the question. Highlighted components, edges and angles are the ones used in this step.</div>
 </div>
 """
 
@@ -929,19 +929,60 @@ async function loadThree() {
   return { THREE, OrbitControls: controls.OrbitControls };
 }
 
-function textSprite(THREE, text, color='#0f172a') {
+function textSprite(THREE, text, color='#0f172a', scale=1.0) {
   if (!text) return null;
-  const canvas=document.createElement('canvas'); canvas.width=512; canvas.height=128;
-  const ctx=canvas.getContext('2d'); ctx.clearRect(0,0,512,128); ctx.font='52px system-ui, sans-serif'; ctx.fillStyle=color; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(text,256,64);
+  const canvas=document.createElement('canvas'); canvas.width=640; canvas.height=160;
+  const ctx=canvas.getContext('2d'); ctx.clearRect(0,0,640,160);
+  ctx.font='600 48px system-ui, sans-serif';
+  const w=Math.min(600, Math.max(120, ctx.measureText(text).width+42));
+  ctx.fillStyle='rgba(255,255,255,.88)'; ctx.beginPath(); ctx.roundRect((640-w)/2,34,w,92,20); ctx.fill();
+  ctx.strokeStyle='rgba(100,116,139,.25)'; ctx.stroke();
+  ctx.fillStyle=color; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(text,320,80);
   const texture=new THREE.CanvasTexture(canvas); texture.minFilter=THREE.LinearFilter;
   const material=new THREE.SpriteMaterial({map:texture,transparent:true,depthTest:false});
-  const sprite=new THREE.Sprite(material); sprite.scale.set(1.6,0.4,1); sprite.userData.__texture=texture; return sprite;
+  const sprite=new THREE.Sprite(material); sprite.scale.set(2.1*scale,.52*scale,1); sprite.userData.__texture=texture; return sprite;
 }
 
 function edgeMaterial(THREE,id,highlight,dim,dashed=false){
-  const hi=highlight.has(id), low=dim.has(id); const color=hi?0xdc2626:(low?0xcbd5e1:0x334155); const opacity=low?0.22:0.95;
-  if(dashed) return new THREE.LineDashedMaterial({color,transparent:true,opacity,dashSize:.18,gapSize:.1,linewidth:hi?3:1});
-  return new THREE.LineBasicMaterial({color,transparent:true,opacity,linewidth:hi?3:1});
+  const hi=highlight.has(id), low=dim.has(id); const color=hi?0xdc2626:(low?0x94a3b8:0x334155); const opacity=low?0.28:1;
+  if(dashed) return new THREE.LineDashedMaterial({color,transparent:true,opacity,dashSize:.18,gapSize:.1});
+  return new THREE.LineBasicMaterial({color,transparent:true,opacity});
+}
+
+function hashColor(id){
+  const palette=[0x60a5fa,0x34d399,0xf59e0b,0xa78bfa,0x22d3ee,0xfb7185,0x84cc16];
+  let h=0; for(const ch of String(id||'')) h=(h*31+ch.charCodeAt(0))>>>0;
+  return palette[h%palette.length];
+}
+
+function solidMaterial(THREE,id,highlight,dim){
+  const hi=highlight.has(id), low=dim.has(id);
+  return new THREE.MeshStandardMaterial({
+    color: hi?0xf97316:hashColor(id),
+    roughness:.72, metalness:.02,
+    transparent: low,
+    opacity: low?.16:1,
+    side: THREE.DoubleSide,
+    depthWrite: !low,
+  });
+}
+
+function orientAxis(mesh,axis){
+  if(axis==='x') mesh.rotation.z=-Math.PI/2;
+  else if(axis==='z') mesh.rotation.x=Math.PI/2;
+}
+
+function addSolidEdges(THREE,mesh,id,highlight,dim,scene){
+  const geom=new THREE.EdgesGeometry(mesh.geometry,20);
+  const mat=new THREE.LineBasicMaterial({color:highlight.has(id)?0xc2410c:(dim.has(id)?0x94a3b8:0x334155),transparent:true,opacity:dim.has(id)?.22:.92});
+  const lines=new THREE.LineSegments(geom,mat); lines.position.copy(mesh.position); lines.rotation.copy(mesh.rotation); lines.scale.copy(mesh.scale); scene.add(lines);
+  return lines;
+}
+
+function addSolidLabel(THREE,mesh,label,id,highlight,scene){
+  if(!label) return;
+  const box=new THREE.Box3().setFromObject(mesh); const top=box.getCenter(new THREE.Vector3()); top.y=box.max.y+.22;
+  const sp=textSprite(THREE,label,highlight.has(id)?'#c2410c':'#334155',.78); if(sp){sp.position.copy(top);scene.add(sp);}
 }
 
 export default async function(component) {
@@ -949,13 +990,14 @@ export default async function(component) {
   const stage=parentElement.querySelector('.omt-visual3d-stage');
   const sceneData=data?.scene||{}, step=data?.step||{};
   const highlight=new Set(step.highlight_ids||[]), dim=new Set(step.dim_ids||[]);
-  const animate=new Set([...(step.highlight_ids||[]), ...(data?.animate_ids||step.animate_ids||[])]);
+  const explicitAnimate=new Set(data?.animate_ids||step.animate_ids||[]);
+  const animate=new Set([...(step.highlight_ids||[]), ...explicitAnimate]);
+  const newlyRevealed=new Set(step.reveal_ids||[]);
   const revealMode=Boolean(data?.reveal_mode), visible=new Set(data?.visible_ids||[]);
   const isVisible=(id)=>!revealMode||visible.has(id)||highlight.has(id)||animate.has(id);
-  // Guarantee a visible replay even when the model did not mark a construction
-  // action for this step: animate the currently visible vertices/edges.
+  const solidGroups=[sceneData.boxes||[],sceneData.cylinders||[],sceneData.cones||[],sceneData.spheres||[],sceneData.extrusions||[]];
   if(animate.size===0 && Number(data?.animation_nonce||0)>0){
-    for(const group of [sceneData.vertices||[],sceneData.edges||[],sceneData.faces||[],sceneData.angles||[]]){
+    for(const group of [sceneData.vertices||[],sceneData.edges||[],sceneData.faces||[],sceneData.angles||[],...solidGroups]){
       for(const item of group) if(isVisible(item.id)) animate.add(item.id);
     }
   }
@@ -966,9 +1008,14 @@ export default async function(component) {
   try{({THREE,OrbitControls}=await loadThree());}catch(err){stage.textContent='Interactive 3D visual could not load.';return;}
 
   const scene=new THREE.Scene();
-  const camera=new THREE.PerspectiveCamera(42,1,.01,1000);
-  const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true}); renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2)); renderer.setClearColor(0xffffff,0); stage.appendChild(renderer.domElement);
+  const camera=new THREE.PerspectiveCamera(38,1,.01,2000);
+  const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2)); renderer.setClearColor(0xffffff,0);
+  renderer.outputColorSpace=THREE.SRGBColorSpace; stage.appendChild(renderer.domElement);
   const controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.dampingFactor=.08; controls.enablePan=true;
+  scene.add(new THREE.HemisphereLight(0xffffff,0xb8c2cf,2.1));
+  const keyLight=new THREE.DirectionalLight(0xffffff,2.2); keyLight.position.set(7,10,8); scene.add(keyLight);
+  const fillLight=new THREE.DirectionalLight(0xffffff,1.0); fillLight.position.set(-7,4,-6); scene.add(fillLight);
 
   const vertices=new Map(), coords=[];
   for(const v of (sceneData.vertices||[])){const pos=new THREE.Vector3(Number(v.x),Number(v.y),Number(v.z));coords.push(pos);vertices.set(v.id,pos);}
@@ -977,12 +1024,56 @@ export default async function(component) {
   for(const f of (sceneData.faces||[])) if(isVisible(f.id)) for(const id of (f.vertices||[])) neededVertices.add(id);
   for(const a of (sceneData.angles||[])) if(isVisible(a.id)){neededVertices.add(a.arm1);neededVertices.add(a.vertex);neededVertices.add(a.arm2);}
 
+  const solidTweens=[];
+  const registerSolid=(mesh,id,label)=>{
+    const baseScale=mesh.scale.clone(); const doAnimate=animate.has(id);
+    if(doAnimate){const startScale=newlyRevealed.has(id)?.08:.86;mesh.scale.multiplyScalar(startScale); solidTweens.push({mesh,baseScale,startScale,start:performance.now()+60,duration:720});}
+    scene.add(mesh); const edge=addSolidEdges(THREE,mesh,id,highlight,dim,scene); mesh.userData.__edge=edge;
+    addSolidLabel(THREE,mesh,label,id,highlight,scene);
+    const box=new THREE.Box3().setFromObject(mesh); if(Number.isFinite(box.min.x)){coords.push(box.min.clone(),box.max.clone());}
+  };
+
+  for(const b of (sceneData.boxes||[])){
+    if(!isVisible(b.id)) continue;
+    const geom=new THREE.BoxGeometry(Number(b.width),Number(b.height),Number(b.depth));
+    const mesh=new THREE.Mesh(geom,solidMaterial(THREE,b.id,highlight,dim));
+    mesh.position.set(...(b.center||[0,0,0])); const r=b.rotation||[0,0,0]; mesh.rotation.set(Number(r[0]||0),Number(r[1]||0),Number(r[2]||0));
+    registerSolid(mesh,b.id,b.label||'');
+  }
+
+  for(const c of (sceneData.cylinders||[])){
+    if(!isVisible(c.id)) continue;
+    const geom=new THREE.CylinderGeometry(Number(c.radius),Number(c.radius),Number(c.height),48,1,false);
+    const mesh=new THREE.Mesh(geom,solidMaterial(THREE,c.id,highlight,dim)); mesh.position.set(...(c.center||[0,0,0])); orientAxis(mesh,c.axis||'y'); registerSolid(mesh,c.id,c.label||'');
+  }
+
+  for(const c of (sceneData.cones||[])){
+    if(!isVisible(c.id)) continue;
+    const geom=new THREE.ConeGeometry(Number(c.radius),Number(c.height),48,1,false);
+    const mesh=new THREE.Mesh(geom,solidMaterial(THREE,c.id,highlight,dim)); mesh.position.set(...(c.center||[0,0,0])); orientAxis(mesh,c.axis||'y'); registerSolid(mesh,c.id,c.label||'');
+  }
+
+  for(const sp of (sceneData.spheres||[])){
+    if(!isVisible(sp.id)) continue;
+    const geom=new THREE.SphereGeometry(Number(sp.radius),40,24);
+    const mesh=new THREE.Mesh(geom,solidMaterial(THREE,sp.id,highlight,dim)); mesh.position.set(...(sp.center||[0,0,0])); registerSolid(mesh,sp.id,sp.label||'');
+  }
+
+  for(const ex of (sceneData.extrusions||[])){
+    if(!isVisible(ex.id)||!(ex.profile||[]).length) continue;
+    const profile=ex.profile; const shape=new THREE.Shape(); shape.moveTo(Number(profile[0][0]),Number(profile[0][1]));
+    for(let i=1;i<profile.length;i++) shape.lineTo(Number(profile[i][0]),Number(profile[i][1])); shape.closePath();
+    const geom=new THREE.ExtrudeGeometry(shape,{depth:Number(ex.depth),bevelEnabled:false,steps:1}); geom.center();
+    if((ex.axis||'z')==='x') geom.rotateY(Math.PI/2); else if((ex.axis||'z')==='y') geom.rotateX(-Math.PI/2);
+    const mesh=new THREE.Mesh(geom,solidMaterial(THREE,ex.id,highlight,dim)); mesh.position.set(...(ex.center||[0,0,0])); registerSolid(mesh,ex.id,ex.label||'');
+  }
+
   for(const v of (sceneData.vertices||[])){
     if(!isVisible(v.id)&&!neededVertices.has(v.id)) continue;
     const pos=vertices.get(v.id), hi=highlight.has(v.id), low=dim.has(v.id);
-    const geom=new THREE.SphereGeometry(hi?.09:.07,18,12); const mat=new THREE.MeshBasicMaterial({color:hi?0xdc2626:(low?0xcbd5e1:0x0f172a),transparent:true,opacity:animate.has(v.id)?.08:(low?.28:1)});
+    const geom=new THREE.SphereGeometry(hi?.085:.055,18,12); const mat=new THREE.MeshBasicMaterial({color:hi?0xdc2626:(low?0xcbd5e1:0x0f172a),transparent:true,opacity:low?.3:1});
     const mesh=new THREE.Mesh(geom,mat);mesh.position.copy(pos);scene.add(mesh);
-    const label=textSprite(THREE,v.label||v.id,hi?'#dc2626':'#0f172a');if(label){label.position.copy(pos).add(new THREE.Vector3(.12,.16,.08));scene.add(label);}
+    const label=textSprite(THREE,v.label||v.id,hi?'#dc2626':'#0f172a',.68);if(label){label.position.copy(pos).add(new THREE.Vector3(.12,.16,.08));scene.add(label);}
   }
 
   const edgeTweens=[];
@@ -997,13 +1088,13 @@ export default async function(component) {
     }else{
       const geom=new THREE.BufferGeometry().setFromPoints([a,b]);const line=new THREE.Line(geom,mat);if(e.dashed)line.computeLineDistances();scene.add(line);
     }
-    if(e.label){const m=a.clone().add(b).multiplyScalar(.5);const sp=textSprite(THREE,e.label,highlight.has(e.id)?'#dc2626':'#334155');if(sp){sp.position.copy(m).add(new THREE.Vector3(.08,.08,.08));scene.add(sp);}}
+    if(e.label){const m=a.clone().add(b).multiplyScalar(.5);const sp=textSprite(THREE,e.label,highlight.has(e.id)?'#dc2626':'#334155',.66);if(sp){sp.position.copy(m).add(new THREE.Vector3(.08,.08,.08));scene.add(sp);}}
   }
 
   for(const f of (sceneData.faces||[])){
     if(!isVisible(f.id))continue;const vv=(f.vertices||[]).map(id=>vertices.get(id)).filter(Boolean);if(vv.length<3)continue;
     const arr=[];for(let i=1;i<vv.length-1;i++){for(const p of[vv[0],vv[i],vv[i+1]])arr.push(p.x,p.y,p.z);}const geom=new THREE.BufferGeometry();geom.setAttribute('position',new THREE.Float32BufferAttribute(arr,3));geom.computeVertexNormals();
-    const hi=highlight.has(f.id),low=dim.has(f.id);const mat=new THREE.MeshBasicMaterial({color:hi?0xfca5a5:0x94a3b8,transparent:true,opacity:low?.025:(hi?.16:.055),side:THREE.DoubleSide,depthWrite:false});scene.add(new THREE.Mesh(geom,mat));
+    const hi=highlight.has(f.id),low=dim.has(f.id);const mat=new THREE.MeshStandardMaterial({color:hi?0xf97316:0x94a3b8,transparent:true,opacity:low?.06:(hi?.32:.18),side:THREE.DoubleSide,depthWrite:false,roughness:.85});scene.add(new THREE.Mesh(geom,mat));
   }
 
   for(const aDef of (sceneData.angles||[])){
@@ -1011,26 +1102,29 @@ export default async function(component) {
     const u=pa.clone().sub(pv).normalize(),w=pc.clone().sub(pv).normalize(),dot=THREE.MathUtils.clamp(u.dot(w),-1,1),theta=Math.acos(dot),sin=Math.sin(theta);if(theta<.02||Math.abs(sin)<1e-4)continue;
     const tangent=w.clone().sub(u.clone().multiplyScalar(dot)).normalize(),radius=.34,samples=[];for(let i=0;i<=28;i++){const t=theta*i/28;samples.push(pv.clone().add(u.clone().multiplyScalar(Math.cos(t)*radius)).add(tangent.clone().multiplyScalar(Math.sin(t)*radius)));}
     const geom=new THREE.BufferGeometry().setFromPoints(samples),mat=edgeMaterial(THREE,aDef.id,highlight,dim,false);scene.add(new THREE.Line(geom,mat));
-    if(aDef.label){const mid=samples[Math.floor(samples.length/2)],sp=textSprite(THREE,aDef.label,highlight.has(aDef.id)?'#dc2626':'#334155');if(sp){sp.position.copy(mid);scene.add(sp);}}
+    if(aDef.label){const mid=samples[Math.floor(samples.length/2)],sp=textSprite(THREE,aDef.label,highlight.has(aDef.id)?'#dc2626':'#334155',.66);if(sp){sp.position.copy(mid);scene.add(sp);}}
   }
 
-  let center=new THREE.Vector3(0,0,0),radius=2;if(coords.length){const box=new THREE.Box3().setFromPoints(coords);center=box.getCenter(new THREE.Vector3());radius=Math.max(box.getSize(new THREE.Vector3()).length()*.72,1.4);}
+  let center=new THREE.Vector3(0,0,0),radius=2;if(coords.length){const box=new THREE.Box3().setFromPoints(coords);center=box.getCenter(new THREE.Vector3());radius=Math.max(box.getSize(new THREE.Vector3()).length()*.72,1.6);}
+  const grid=new THREE.GridHelper(radius*2.3,12,0xcbd5e1,0xe2e8f0); grid.position.y=Math.min(...coords.map(p=>p.y),0)-.08; grid.material.transparent=true; grid.material.opacity=.32; scene.add(grid);
   const cp=Array.isArray(step.camera_position)&&step.camera_position.length===3?step.camera_position:null,ct=Array.isArray(step.camera_target)&&step.camera_target.length===3?step.camera_target:null;
-  const targetPos=new THREE.Vector3(...(cp?cp:[center.x+radius*1.35,center.y+radius*.9,center.z+radius*1.35]));
+  const targetPos=new THREE.Vector3(...(cp?cp:[center.x+radius*1.3,center.y+radius*.85,center.z+radius*1.3]));
   const targetLook=new THREE.Vector3(...(ct?ct:[center.x,center.y,center.z]));
   const pcp=Array.isArray(data?.previous_camera_position)&&data.previous_camera_position.length===3?new THREE.Vector3(...data.previous_camera_position):targetPos.clone();
   const pct=Array.isArray(data?.previous_camera_target)&&data.previous_camera_target.length===3?new THREE.Vector3(...data.previous_camera_target):targetLook.clone();
   camera.position.copy(pcp);controls.target.copy(pct);camera.lookAt(controls.target);controls.update();
   const camStart=performance.now(),camDuration=850;
 
-  const resize=()=>{const w=Math.max(stage.clientWidth,320),h=Math.max(stage.clientHeight,360);renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();};resize();const ro=new ResizeObserver(resize);ro.observe(stage);
+  const resize=()=>{const w=Math.max(stage.clientWidth,320),h=Math.max(stage.clientHeight,390);renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();};resize();const ro=new ResizeObserver(resize);ro.observe(stage);
   let raf=0;const animateFrame=(now)=>{raf=requestAnimationFrame(animateFrame);
     const ctween=Math.min(1,(now-camStart)/camDuration);const ce=1-Math.pow(1-ctween,3);camera.position.lerpVectors(pcp,targetPos,ce);controls.target.lerpVectors(pct,targetLook,ce);
     for(const tw of edgeTweens){const t=Math.max(0,Math.min(1,(now-tw.start)/tw.duration)),e=1-Math.pow(1-t,3),cur=tw.a.clone().lerp(tw.b,e);tw.attr.setXYZ(1,cur.x,cur.y,cur.z);tw.attr.needsUpdate=true;if(tw.line.material.isLineDashedMaterial)tw.line.computeLineDistances();}
+    for(const tw of solidTweens){const t=Math.max(0,Math.min(1,(now-tw.start)/tw.duration)),e=1-Math.pow(1-t,3),k=tw.startScale+(1-tw.startScale)*e;tw.mesh.scale.copy(tw.baseScale).multiplyScalar(k); if(tw.mesh.userData.__edge) tw.mesh.userData.__edge.scale.copy(tw.mesh.scale);}
     controls.update();renderer.render(scene,camera);
   };raf=requestAnimationFrame(animateFrame);
   parentElement.__omtThreeCleanup=()=>{cancelAnimationFrame(raf);ro.disconnect();controls.dispose();scene.traverse(o=>{o.geometry?.dispose?.();if(o.material){const mats=Array.isArray(o.material)?o.material:[o.material];for(const m of mats){m.map?.dispose?.();m.dispose?.();}}});renderer.dispose();renderer.domElement.remove();};
 }
+
 """
 
 try:
@@ -1082,6 +1176,8 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
     st.caption(
         f"Reconstruction confidence: {plan.reconstruction_confidence.title()}. {plan.reconstruction_note}"
     )
+    if plan.mode == "geometry3d" and getattr(plan, "reconstructed_parts", None):
+        st.markdown("**3D form identified from the question:** " + " · ".join(plan.reconstructed_parts))
     max_index = len(plan.steps) - 1
     idx = max(0, min(int(st.session_state.get("ai_visual_step", 0)), max_index))
     st.session_state.ai_visual_step = idx
