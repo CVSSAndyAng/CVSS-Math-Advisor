@@ -475,130 +475,188 @@ def working_input(
 
 _HANDWRITING_HTML = """
 <div class="omt-handwriting-pad">
-  <div class="omt-handwriting-help">Write directly with Apple Pencil, stylus, or finger. Use one line per step and label parts such as (a), (b), (c).</div>
+  <div class="omt-handwriting-help">Write with Apple Pencil, stylus, or finger. Nothing is sent to Streamlit while you are writing, so the pad will not refresh after every stroke.</div>
   <div class="omt-handwriting-toolbar">
+    <button type="button" class="omt-undo-pad">Undo</button>
     <button type="button" class="omt-clear-pad">Clear</button>
+    <button type="button" class="omt-save-pad omt-primary-pad">Save handwriting</button>
   </div>
   <canvas class="omt-handwriting-canvas" aria-label="Handwritten mathematics working area"></canvas>
-  <div class="omt-handwriting-status" aria-live="polite"></div>
+  <div class="omt-handwriting-status" aria-live="polite">Write first, then tap Save handwriting before checking your answer.</div>
 </div>
 """
 
 _HANDWRITING_CSS = """
-.omt-handwriting-pad { width: 100%; font-family: var(--st-font, sans-serif); }
-.omt-handwriting-help { opacity: .74; font-size: .88rem; margin: 0 0 .55rem 0; }
-.omt-handwriting-toolbar { display:flex; justify-content:flex-end; margin-bottom:.45rem; }
-.omt-clear-pad { min-height:44px; padding:.45rem .85rem; border:1px solid rgba(128,128,128,.42); border-radius:.5rem; background:transparent; color:var(--st-text-color,#222); }
-.omt-handwriting-canvas { width:100%; height:420px; display:block; background:white; border:1px solid rgba(128,128,128,.45); border-radius:.7rem; touch-action:none; box-sizing:border-box; }
-.omt-handwriting-status { min-height:1rem; margin-top:.35rem; font-size:.78rem; opacity:.7; }
-@media (max-width: 900px) { .omt-handwriting-canvas { height:360px; } }
-@media (pointer: coarse) { .omt-handwriting-canvas { height:46vh; min-height:320px; max-height:520px; } }
+.omt-handwriting-pad { width:100%; font-family:var(--st-font,sans-serif); overscroll-behavior:contain; }
+.omt-handwriting-help { opacity:.78; font-size:.9rem; margin:0 0 .55rem 0; }
+.omt-handwriting-toolbar { display:flex; justify-content:flex-end; gap:.45rem; flex-wrap:wrap; margin-bottom:.5rem; }
+.omt-handwriting-toolbar button { min-height:44px; padding:.5rem .85rem; border:1px solid rgba(128,128,128,.42); border-radius:.55rem; background:transparent; color:var(--st-text-color,#222); font-weight:600; }
+.omt-handwriting-toolbar .omt-primary-pad { background:#ff4b4b; color:#fff; border-color:#ff4b4b; }
+.omt-handwriting-canvas { width:100%; height:430px; display:block; background:#fff; border:1px solid rgba(128,128,128,.48); border-radius:.7rem; touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; overscroll-behavior:contain; box-sizing:border-box; }
+.omt-handwriting-status { min-height:1.2rem; margin-top:.4rem; font-size:.8rem; opacity:.76; }
+@media (max-width:900px) { .omt-handwriting-canvas { height:390px; } }
+@media (pointer:coarse) { .omt-handwriting-canvas { height:48vh; min-height:340px; max-height:600px; } .omt-handwriting-toolbar button { min-height:48px; font-size:1rem; } }
 """
 
 _HANDWRITING_JS = r"""
-function dataUrlIsPresent(value) {
+function validPng(value) {
   return typeof value === 'string' && value.startsWith('data:image/png;base64,') && value.length > 100;
 }
 
 export default function(component) {
   const { parentElement, data, setStateValue } = component;
   const canvas = parentElement.querySelector('.omt-handwriting-canvas');
+  const undoButton = parentElement.querySelector('.omt-undo-pad');
   const clearButton = parentElement.querySelector('.omt-clear-pad');
+  const saveButton = parentElement.querySelector('.omt-save-pad');
   const status = parentElement.querySelector('.omt-handwriting-status');
-  const ctx = canvas.getContext('2d', { alpha: false });
+  const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true });
+
+  // Important: setStateValue() causes a Streamlit rerun. Therefore it is only
+  // called when the student taps Save handwriting, never at pointer-up.
   let drawing = false;
   let hasInk = false;
+  let dirty = false;
   let lastX = 0;
   let lastY = 0;
-  let restoreData = data?.image_data_url || '';
+  let history = [];
+  const restoreData = validPng(data?.image_data_url) ? data.image_data_url : '';
 
-  const setCanvasSize = () => {
-    const rect = canvas.getBoundingClientRect();
+  const cssSize = () => {
+    const r = canvas.getBoundingClientRect();
+    return { w: Math.max(1, r.width), h: Math.max(1, r.height) };
+  };
+
+  const paintWhite = () => {
+    const { w, h } = cssSize();
+    ctx.save();
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.restore();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,w,h);
+  };
+
+  const configureCanvasOnce = () => {
+    const { w, h } = cssSize();
     const ratio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
-    const old = hasInk ? canvas.toDataURL('image/png') : restoreData;
-    canvas.width = Math.max(1, Math.floor(rect.width * ratio));
-    canvas.height = Math.max(1, Math.floor(rect.height * ratio));
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, rect.width, rect.height);
+    canvas.width = Math.max(1, Math.round(w * ratio));
+    canvas.height = Math.max(1, Math.round(h * ratio));
+    ctx.setTransform(ratio,0,0,ratio,0,0);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = '#111111';
-    ctx.lineWidth = 2.4;
-    if (dataUrlIsPresent(old)) {
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 2.6;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,w,h);
+
+    if (restoreData) {
       const img = new Image();
       img.onload = () => {
-        ctx.drawImage(img, 0, 0, rect.width, rect.height);
+        ctx.drawImage(img,0,0,w,h);
         hasInk = true;
+        dirty = false;
+        status.textContent = 'Saved handwriting restored. Continue writing or tap Save handwriting again after changes.';
       };
-      img.src = old;
+      img.src = restoreData;
     }
+  };
+
+  const snapshot = () => {
+    try {
+      history.push(canvas.toDataURL('image/png'));
+      if (history.length > 24) history.shift();
+    } catch (_) {}
+  };
+
+  const restoreSnapshot = (url) => {
+    if (!validPng(url)) return;
+    const img = new Image();
+    img.onload = () => {
+      const { w, h } = cssSize();
+      ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h);
+      ctx.drawImage(img,0,0,w,h);
+      hasInk = true; dirty = true;
+      status.textContent = 'Undo applied. Tap Save handwriting when finished.';
+    };
+    img.src = url;
   };
 
   const point = (ev) => {
-    const rect = canvas.getBoundingClientRect();
-    return [ev.clientX - rect.left, ev.clientY - rect.top];
+    const r = canvas.getBoundingClientRect();
+    return [ev.clientX-r.left, ev.clientY-r.top];
   };
 
-  const emit = () => {
-    if (!hasInk) {
-      setStateValue('image_data_url', '');
-      status.textContent = 'Canvas is blank';
-      return;
+  const drawEvent = (ev) => {
+    const events = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [ev];
+    for (const e of events) {
+      const [x,y] = point(e);
+      const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
+      ctx.lineWidth = 1.9 + pressure * 2.7;
+      ctx.lineTo(x,y);
+      ctx.stroke();
+      lastX=x; lastY=y;
     }
-    setStateValue('image_data_url', canvas.toDataURL('image/png'));
-    status.textContent = 'Handwriting saved';
   };
 
   const start = (ev) => {
+    if (ev.pointerType === 'touch' && ev.isPrimary === false) return;
     ev.preventDefault();
-    drawing = true;
-    hasInk = true;
+    snapshot();
+    drawing = true; hasInk = true; dirty = true;
     canvas.setPointerCapture?.(ev.pointerId);
-    [lastX, lastY] = point(ev);
-    ctx.beginPath();
-    ctx.moveTo(lastX, lastY);
+    [lastX,lastY] = point(ev);
+    ctx.beginPath(); ctx.moveTo(lastX,lastY);
+    status.textContent = 'Writing… tap Save handwriting when the page is complete.';
   };
 
   const move = (ev) => {
     if (!drawing) return;
     ev.preventDefault();
-    const [x, y] = point(ev);
-    const pressure = ev.pressure && ev.pressure > 0 ? ev.pressure : 0.5;
-    ctx.lineWidth = 1.8 + pressure * 2.4;
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    lastX = x; lastY = y;
+    drawEvent(ev);
   };
 
   const end = (ev) => {
     if (!drawing) return;
     ev.preventDefault();
     drawing = false;
+    try { canvas.releasePointerCapture?.(ev.pointerId); } catch (_) {}
     ctx.closePath();
-    emit();
+    status.textContent = 'Unsaved handwriting. Tap Save handwriting before checking your answer.';
   };
 
-  canvas.onpointerdown = start;
-  canvas.onpointermove = move;
-  canvas.onpointerup = end;
-  canvas.onpointercancel = end;
-  canvas.onpointerleave = (ev) => { if (drawing && ev.buttons === 0) end(ev); };
+  canvas.onpointerdown=start;
+  canvas.onpointermove=move;
+  canvas.onpointerup=end;
+  canvas.onpointercancel=end;
+
+  undoButton.onclick = () => {
+    const previous = history.pop();
+    if (previous) restoreSnapshot(previous);
+  };
 
   clearButton.onclick = () => {
-    const rect = canvas.getBoundingClientRect();
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, rect.width, rect.height);
-    hasInk = false;
-    restoreData = '';
-    emit();
+    snapshot();
+    const { w,h }=cssSize();
+    ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h);
+    hasInk=false; dirty=true;
+    status.textContent='Canvas cleared locally. Tap Save handwriting to save the blank page, or Undo to restore.';
   };
 
-  setCanvasSize();
-  const observer = new ResizeObserver(() => setCanvasSize());
-  observer.observe(canvas);
-  parentElement.__omtHandwritingObserver?.disconnect?.();
-  parentElement.__omtHandwritingObserver = observer;
+  saveButton.onclick = () => {
+    // This is the only normal path that sends canvas state to Python and reruns Streamlit.
+    const url = hasInk ? canvas.toDataURL('image/png') : '';
+    dirty=false;
+    status.textContent = hasInk ? 'Saving handwriting…' : 'Saving blank canvas…';
+    setStateValue('image_data_url', url);
+  };
+
+  configureCanvasOnce();
+
+  // Prevent Safari gestures/scrolling from stealing Pencil strokes while inside the pad.
+  canvas.addEventListener('touchstart', e => e.preventDefault(), { passive:false });
+  canvas.addEventListener('touchmove', e => e.preventDefault(), { passive:false });
 }
 """
 
@@ -685,10 +743,13 @@ def targeted_practice_input(
         return value, mode, value, []
 
     st.caption(
-        "On iPad, write directly in the pad with Apple Pencil/finger, or use the camera/upload controls. "
-        "For multi-part questions, label the working (a), (b), (c) where possible."
+        "On iPad, write directly with Apple Pencil/finger. The pad no longer submits after every stroke. "
+        "When the page is complete, tap **Save handwriting** once before checking the answer. "
+        "You can also use the camera/upload controls. For multi-part questions, label (a), (b), (c)."
     )
     canvas_asset = handwriting_pad(key=f"{key_base}_handwriting")
+    if canvas_asset is None:
+        st.info("If you are using the handwriting pad, finish the page and tap **Save handwriting** before pressing the marking button.")
     camera_file = st.camera_input(
         "Take a photo of handwritten working",
         key=f"{key_base}_camera",
@@ -2401,6 +2462,9 @@ with ai_tab:
             )
 
             if st.button(f"Check {kind} reasoning", key=f"ai_practice_check_{stage_index}_{st.session_state.ai_practice_question_version}", type="primary"):
+                if practice_input_mode == "Handwritten working" and not attempt.strip() and not practice_assets:
+                    st.warning("No saved handwriting was received. Return to the handwriting pad, tap **Save handwriting**, then check the reasoning again.")
+                    st.stop()
                 try:
                     with st.spinner("Checking the practice reasoning..."):
                         evaluation = evaluate_practice_attempt(
