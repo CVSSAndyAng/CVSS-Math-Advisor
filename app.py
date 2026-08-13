@@ -999,16 +999,42 @@ THREE_VERSION = "0.185.0"  # three.js r185
 
 _VISUAL_2D_HTML = """
 <div class="omt-visual2d-shell">
+  <div class="omt-gg-toolbar" role="toolbar" aria-label="Interactive geometry tools">
+    <button type="button" data-tool="move" class="active">Move</button>
+    <button type="button" data-tool="point">Point</button>
+    <button type="button" data-tool="line">Line</button>
+    <button type="button" data-tool="segment">Segment</button>
+    <button type="button" data-tool="ray">Ray</button>
+    <button type="button" data-tool="vector">Vector</button>
+    <button type="button" data-tool="circle">Circle</button>
+    <button type="button" data-tool="polygon">Polygon</button>
+    <button type="button" data-tool="finish" class="secondary">Finish</button>
+    <button type="button" data-tool="midpoint">Midpoint</button>
+    <button type="button" data-tool="perpendicular">Perpendicular</button>
+    <button type="button" data-tool="parallel">Parallel</button>
+    <button type="button" data-tool="angle">Measure angle</button>
+    <button type="button" data-tool="distance">Distance</button>
+    <button type="button" data-tool="delete">Delete</button>
+    <button type="button" data-tool="undo" class="secondary">Undo</button>
+    <button type="button" data-tool="clear" class="secondary">Clear</button>
+    <button type="button" data-tool="snap" class="secondary active">Snap 0.5</button>
+  </div>
+  <div class="omt-gg-status">Use Move to pan/zoom, or select a construction tool.</div>
   <div class="omt-visual2d-board"></div>
-  <div class="omt-visual-help">Drag to pan. Use the mouse wheel/trackpad to zoom where supported.</div>
+  <div class="omt-visual-help">GeoGebra-style tools are for exploration. The tutor's construction remains separate from your added objects.</div>
 </div>
 """
 
 _VISUAL_2D_CSS = """
 .omt-visual2d-shell { width: 100%; }
-.omt-visual2d-board { width: 100%; height: min(62vw, 520px); min-height: 360px; border: 1px solid rgba(128,128,128,.28); border-radius: .75rem; overflow: hidden; background: #ffffff; touch-action: none; }
+.omt-gg-toolbar { display:flex; gap:.38rem; overflow-x:auto; padding:.1rem 0 .48rem; scrollbar-width:thin; -webkit-overflow-scrolling:touch; }
+.omt-gg-toolbar button { flex:0 0 auto; border:1px solid #cbd5e1; background:#fff; color:#334155; border-radius:.62rem; padding:.5rem .68rem; min-height:38px; font:650 .78rem/1 system-ui,sans-serif; cursor:pointer; }
+.omt-gg-toolbar button.active { background:#eaf2ff; border-color:#60a5fa; color:#1d4ed8; }
+.omt-gg-toolbar button.secondary { background:#f8fafc; }
+.omt-gg-status { font-size:.78rem; color:#64748b; margin:0 0 .42rem; min-height:1.1rem; }
+.omt-visual2d-board { width: 100%; height: min(62vw, 520px); min-height: 360px; border: 1px solid rgba(128,128,128,.28); border-radius: .75rem; overflow: hidden; background: #ffffff; touch-action:none; }
 .omt-visual-help { margin-top: .35rem; font-size: .78rem; opacity: .68; }
-@media (max-width: 640px) { .omt-visual2d-board { height: 420px; min-height: 340px; } }
+@media (max-width: 640px) { .omt-visual2d-board { height: 420px; min-height: 340px; } .omt-gg-toolbar button { min-height:44px; padding:.62rem .76rem; } }
 """
 
 _VISUAL_2D_JS = r"""
@@ -1018,6 +1044,101 @@ async function loadJXG() {
   if (!globalThis.__omtJXGPromise) globalThis.__omtJXGPromise = import(JXG_URL);
   const mod = await globalThis.__omtJXGPromise;
   return mod.default || mod.JXG || mod;
+}
+
+function installGeoTools(board, toolbar, status, JXG) {
+  if (!toolbar || !status) return () => {};
+  let tool='move', picks=[], polygonPts=[], snap=true;
+  const groups=[];
+  const studentObjects=new Set();
+  const pointStyle={name:'',fixed:false,size:4,strokeColor:'#dc2626',fillColor:'#fff1f2',strokeWidth:2,highlight:true};
+  const lineStyle={fixed:false,strokeColor:'#dc2626',strokeWidth:2.6,highlight:true};
+  const addGroup=(objs)=>{ const arr=objs.filter(Boolean); arr.forEach(o=>studentObjects.add(o)); groups.push(arr); board.update(); };
+  const removeObjects=(objs)=>{ for(const o of [...objs].reverse()){ try{studentObjects.delete(o);board.removeObject(o);}catch(_){ } } board.update(); };
+  const undo=()=>{ if(polygonPts.length){removeObjects([polygonPts.pop()]); return;} const g=groups.pop(); if(g) removeObjects(g); };
+  const clear=()=>{ polygonPts=[]; while(groups.length) removeObjects(groups.pop()); };
+  const roundSnap=(v)=>snap?Math.round(v*2)/2:v;
+  const coords=(ev)=>{ const c=new JXG.Coords(JXG.COORDS_BY_SCREEN,[ev.offsetX,ev.offsetY],board); return [roundSnap(c.usrCoords[1]),roundSnap(c.usrCoords[2])]; };
+  const mkPoint=(xy)=>board.create('point',xy,{...pointStyle});
+  const length=(a,b)=>Math.hypot(a.X()-b.X(),a.Y()-b.Y());
+  const midpointXY=(a,b)=>[(a.X()+b.X())/2,(a.Y()+b.Y())/2];
+  const statusMap={
+    move:'Drag to pan. Pinch or use the wheel to zoom.', point:'Tap to plot a point. Drag it to adjust.', line:'Tap two positions to draw an infinite line.', segment:'Tap two positions to draw a segment.', ray:'Tap the endpoint, then a second point for the ray direction.', vector:'Tap the start and end points of the vector.', circle:'Tap the centre, then a point on the circle.', polygon:'Tap polygon vertices, then press Finish.', midpoint:'Tap two positions to construct their midpoint.', perpendicular:'Tap two points for a reference line, then tap the point the perpendicular passes through.', parallel:'Tap two points for a reference line, then tap the point the parallel passes through.', angle:'Tap arm point 1, then the vertex, then arm point 2.', distance:'Tap two positions to measure their distance.', delete:'Tap one of your red constructions to delete it.'
+  };
+  const setTool=(name)=>{
+    if(name!=='polygon' && polygonPts.length){ status.textContent='Finish or Undo the current polygon before switching tools.'; return; }
+    tool=name; picks=[];
+    toolbar.querySelectorAll('button[data-tool]').forEach(b=>{ if(!['snap','finish','undo','clear'].includes(b.dataset.tool)) b.classList.toggle('active',b.dataset.tool===name); });
+    status.textContent=statusMap[name]||'Select a construction tool.';
+  };
+  const finishPolygon=()=>{
+    if(polygonPts.length<3){status.textContent='A polygon needs at least 3 vertices.';return;}
+    const poly=board.create('polygon',polygonPts,{withLines:true,fillColor:'#fecaca',fillOpacity:.12,borders:{strokeColor:'#dc2626',strokeWidth:2.4},vertices:{visible:true}});
+    addGroup([poly,...polygonPts]); polygonPts=[]; status.textContent='Polygon added. Choose another tool or start another polygon.';
+  };
+  const deleteUnder=(ev)=>{
+    let hits=[]; try{hits=board.getAllUnderMouse(ev)||[];}catch(_){ }
+    const hit=hits.find(o=>studentObjects.has(o));
+    if(hit){ const idx=groups.findIndex(g=>g.includes(hit)); if(idx>=0){const [g]=groups.splice(idx,1);removeObjects(g);} else removeObjects([hit]); status.textContent='Construction deleted.'; }
+    else { status.textContent='Tap a red construction to delete it. If selection is difficult, use Undo.'; }
+  };
+  const addAngleMeasure=(a,v,b)=>{
+    const ang=board.create('angle',[a,v,b],{...lineStyle,radius:.7,fillColor:'#fee2e2',fillOpacity:.18,name:'',withLabel:false});
+    const txt=board.create('text',[()=>v.X()+0.55,()=>v.Y()+0.55,()=>`${(ang.Value()*180/Math.PI).toFixed(1)}°`],{fixed:true,fontSize:13,color:'#b91c1c'});
+    addGroup([a,v,b,ang,txt]);
+  };
+  const addDistance=(a,b)=>{
+    const seg=board.create('segment',[a,b],{...lineStyle,dash:2});
+    const txt=board.create('text',[()=> (a.X()+b.X())/2,()=> (a.Y()+b.Y())/2,()=> length(a,b).toFixed(2)],{fixed:true,fontSize:13,color:'#b91c1c'});
+    addGroup([a,b,seg,txt]);
+  };
+  const handlePointTool=(xy)=>{ const p=mkPoint(xy); addGroup([p]); };
+  const handleMulti=(xy)=>{
+    const p=mkPoint(xy); picks.push(p);
+    const need=(['perpendicular','parallel','angle'].includes(tool)?3:2);
+    status.textContent=`${picks.length}/${need} point${need===1?'':'s'} selected.`;
+    if(picks.length<need) return;
+    const [a,b,c]=picks; picks=[];
+    if(tool==='line'){const o=board.create('line',[a,b],{...lineStyle,straightFirst:true,straightLast:true});addGroup([a,b,o]);}
+    else if(tool==='segment'){const o=board.create('segment',[a,b],lineStyle);addGroup([a,b,o]);}
+    else if(tool==='ray'){const o=board.create('line',[a,b],{...lineStyle,straightFirst:false,straightLast:true});addGroup([a,b,o]);}
+    else if(tool==='vector'){const o=board.create('arrow',[a,b],lineStyle);addGroup([a,b,o]);}
+    else if(tool==='circle'){const o=board.create('circle',[a,b],{...lineStyle,fillOpacity:0});addGroup([a,b,o]);}
+    else if(tool==='midpoint'){const m=board.create('midpoint',[a,b],{...pointStyle,fillColor:'#fef3c7',strokeColor:'#d97706'});addGroup([a,b,m]);}
+    else if(tool==='distance') addDistance(a,b);
+    else if(tool==='angle') addAngleMeasure(a,b,c);
+    else if(tool==='perpendicular'){
+      const base=board.create('line',[a,b],{...lineStyle,strokeColor:'#94a3b8',strokeWidth:1.6,dash:2});
+      const perp=board.create('perpendicular',[base,c],{...lineStyle}); addGroup([a,b,c,base,perp]);
+    }
+    else if(tool==='parallel'){
+      const base=board.create('line',[a,b],{...lineStyle,strokeColor:'#94a3b8',strokeWidth:1.6,dash:2});
+      const para=board.create('parallel',[base,c],{...lineStyle}); addGroup([a,b,c,base,para]);
+    }
+    status.textContent=(statusMap[tool]||'Construction added.')+' Construction added.';
+  };
+  const clickHandler=(ev)=>{
+    const b=ev.target.closest('button[data-tool]'); if(!b)return;
+    const name=b.dataset.tool;
+    if(name==='clear'){clear();status.textContent='Your constructions were cleared.';return;}
+    if(name==='undo'){undo();status.textContent='Last construction removed.';return;}
+    if(name==='finish'){finishPolygon();return;}
+    if(name==='snap'){snap=!snap;b.classList.toggle('active',snap);b.textContent=snap?'Snap 0.5':'Snap off';status.textContent=snap?'Coordinate snapping is on (0.5 units).':'Coordinate snapping is off.';return;}
+    setTool(name);
+  };
+  toolbar.addEventListener('click',clickHandler);
+  const downHandler=(ev)=>{
+    if(tool==='move')return;
+    if(tool==='delete'){deleteUnder(ev);return;}
+    const xy=coords(ev);
+    if(tool==='point'){handlePointTool(xy);return;}
+    if(tool==='polygon'){const p=mkPoint(xy);polygonPts.push(p);status.textContent=`Polygon: ${polygonPts.length} vertices. Add more or press Finish.`;board.update();return;}
+    handleMulti(xy);
+    board.update();
+  };
+  board.on('down',downHandler);
+  setTool('move');
+  return ()=>{ try{toolbar.removeEventListener('click',clickHandler);}catch(_){ } };
 }
 
 function styleFor(id, highlight, dim, kind='line') {
@@ -1047,6 +1168,8 @@ function pulsePoint(board, point, targetSize, targetOpacity) {
 export default async function(component) {
   const { parentElement, data } = component;
   const stage = parentElement.querySelector('.omt-visual2d-board');
+  const toolbar = parentElement.querySelector('.omt-gg-toolbar');
+  const status = parentElement.querySelector('.omt-gg-status');
   const scene = data?.scene || {};
   const step = data?.step || {};
   const highlight = new Set(step.highlight_ids || []);
@@ -1165,6 +1288,8 @@ export default async function(component) {
       strokeWidth:st.strokeWidth, radius:0.55, label:{fontSize:13},
     });
   }
+  const removeGeoTools = installGeoTools(board, toolbar, status, JXG);
+  parentElement.__omtGeoToolsCleanup = removeGeoTools;
   board.update();
 }
 """
@@ -1536,35 +1661,40 @@ except Exception:
 # interaction remains in the browser, so plotting does not rerun Streamlit.
 _PRACTICE_DIAGRAM_HTML = """
 <div class="omt-practice-workspace">
-  <div class="omt-practice-toolbar">
+  <div class="omt-gg-toolbar" role="toolbar" aria-label="GeoGebra-style construction tools">
     <button type="button" data-tool="move" class="active">Move</button>
     <button type="button" data-tool="point">Point</button>
+    <button type="button" data-tool="line">Line</button>
     <button type="button" data-tool="segment">Segment</button>
-    <button type="button" data-tool="clear">Clear my work</button>
+    <button type="button" data-tool="ray">Ray</button>
+    <button type="button" data-tool="vector">Vector</button>
+    <button type="button" data-tool="circle">Circle</button>
+    <button type="button" data-tool="polygon">Polygon</button>
+    <button type="button" data-tool="finish" class="secondary">Finish</button>
+    <button type="button" data-tool="midpoint">Midpoint</button>
+    <button type="button" data-tool="perpendicular">Perpendicular</button>
+    <button type="button" data-tool="parallel">Parallel</button>
+    <button type="button" data-tool="angle">Measure angle</button>
+    <button type="button" data-tool="distance">Distance</button>
+    <button type="button" data-tool="delete">Delete</button>
+    <button type="button" data-tool="undo" class="secondary">Undo</button>
+    <button type="button" data-tool="clear" class="secondary">Clear</button>
+    <button type="button" data-tool="snap" class="secondary active">Snap 0.5</button>
   </div>
-  <div class="omt-practice-status">Explore the diagram. On graphs, choose Point or Segment to add your own construction.</div>
+  <div class="omt-gg-status">Use Move to pan/zoom, or select a construction tool.</div>
   <div class="omt-visual2d-board"></div>
 </div>
 """
 
 _PRACTICE_DIAGRAM_CSS = """
 .omt-practice-workspace { width:100%; }
-.omt-practice-toolbar { display:flex; gap:.4rem; flex-wrap:wrap; margin-bottom:.5rem; }
-.omt-practice-toolbar button {
-  border:1px solid #cbd5e1; background:#fff; color:#334155; border-radius:.65rem;
-  padding:.45rem .72rem; font-size:.82rem; font-weight:650; cursor:pointer;
-}
-.omt-practice-toolbar button.active { background:#eff6ff; border-color:#60a5fa; color:#1d4ed8; }
-.omt-practice-status { font-size:.78rem; color:#64748b; margin:0 0 .45rem; }
-.omt-practice-workspace .omt-visual2d-board {
-  width:100%; height:360px; min-height:300px;
-  border:1px solid rgba(128,128,128,.28); border-radius:.9rem;
-  overflow:hidden; background:#fff; touch-action:none;
-}
-@media (max-width:640px) {
-  .omt-practice-workspace .omt-visual2d-board { height:340px; min-height:290px; }
-  .omt-practice-toolbar button { min-height:42px; padding:.55rem .8rem; }
-}
+.omt-gg-toolbar { display:flex; gap:.38rem; overflow-x:auto; padding:.1rem 0 .48rem; scrollbar-width:thin; -webkit-overflow-scrolling:touch; }
+.omt-gg-toolbar button { flex:0 0 auto; border:1px solid #cbd5e1; background:#fff; color:#334155; border-radius:.62rem; padding:.5rem .68rem; min-height:38px; font:650 .78rem/1 system-ui,sans-serif; cursor:pointer; }
+.omt-gg-toolbar button.active { background:#eaf2ff; border-color:#60a5fa; color:#1d4ed8; }
+.omt-gg-toolbar button.secondary { background:#f8fafc; }
+.omt-gg-status { font-size:.78rem; color:#64748b; margin:0 0 .42rem; min-height:1.1rem; }
+.omt-practice-workspace .omt-visual2d-board { width:100%; height:390px; min-height:320px; border:1px solid rgba(128,128,128,.28); border-radius:.9rem; overflow:hidden; background:#fff; touch-action:none; }
+@media (max-width:640px) { .omt-practice-workspace .omt-visual2d-board { height:360px; min-height:310px; } .omt-gg-toolbar button { min-height:44px; padding:.62rem .76rem; } }
 """
 
 _PRACTICE_DIAGRAM_JS = r"""
@@ -1573,11 +1703,107 @@ async function loadJXG(){
   if(!globalThis.__omtPracticeJXGPromise) globalThis.__omtPracticeJXGPromise=import(JXG_URL);
   const mod=await globalThis.__omtPracticeJXGPromise; return mod.default||mod.JXG||mod;
 }
+
+function installGeoTools(board, toolbar, status, JXG) {
+  if (!toolbar || !status) return () => {};
+  let tool='move', picks=[], polygonPts=[], snap=true;
+  const groups=[];
+  const studentObjects=new Set();
+  const pointStyle={name:'',fixed:false,size:4,strokeColor:'#dc2626',fillColor:'#fff1f2',strokeWidth:2,highlight:true};
+  const lineStyle={fixed:false,strokeColor:'#dc2626',strokeWidth:2.6,highlight:true};
+  const addGroup=(objs)=>{ const arr=objs.filter(Boolean); arr.forEach(o=>studentObjects.add(o)); groups.push(arr); board.update(); };
+  const removeObjects=(objs)=>{ for(const o of [...objs].reverse()){ try{studentObjects.delete(o);board.removeObject(o);}catch(_){ } } board.update(); };
+  const undo=()=>{ if(polygonPts.length){removeObjects([polygonPts.pop()]); return;} const g=groups.pop(); if(g) removeObjects(g); };
+  const clear=()=>{ polygonPts=[]; while(groups.length) removeObjects(groups.pop()); };
+  const roundSnap=(v)=>snap?Math.round(v*2)/2:v;
+  const coords=(ev)=>{ const c=new JXG.Coords(JXG.COORDS_BY_SCREEN,[ev.offsetX,ev.offsetY],board); return [roundSnap(c.usrCoords[1]),roundSnap(c.usrCoords[2])]; };
+  const mkPoint=(xy)=>board.create('point',xy,{...pointStyle});
+  const length=(a,b)=>Math.hypot(a.X()-b.X(),a.Y()-b.Y());
+  const midpointXY=(a,b)=>[(a.X()+b.X())/2,(a.Y()+b.Y())/2];
+  const statusMap={
+    move:'Drag to pan. Pinch or use the wheel to zoom.', point:'Tap to plot a point. Drag it to adjust.', line:'Tap two positions to draw an infinite line.', segment:'Tap two positions to draw a segment.', ray:'Tap the endpoint, then a second point for the ray direction.', vector:'Tap the start and end points of the vector.', circle:'Tap the centre, then a point on the circle.', polygon:'Tap polygon vertices, then press Finish.', midpoint:'Tap two positions to construct their midpoint.', perpendicular:'Tap two points for a reference line, then tap the point the perpendicular passes through.', parallel:'Tap two points for a reference line, then tap the point the parallel passes through.', angle:'Tap arm point 1, then the vertex, then arm point 2.', distance:'Tap two positions to measure their distance.', delete:'Tap one of your red constructions to delete it.'
+  };
+  const setTool=(name)=>{
+    if(name!=='polygon' && polygonPts.length){ status.textContent='Finish or Undo the current polygon before switching tools.'; return; }
+    tool=name; picks=[];
+    toolbar.querySelectorAll('button[data-tool]').forEach(b=>{ if(!['snap','finish','undo','clear'].includes(b.dataset.tool)) b.classList.toggle('active',b.dataset.tool===name); });
+    status.textContent=statusMap[name]||'Select a construction tool.';
+  };
+  const finishPolygon=()=>{
+    if(polygonPts.length<3){status.textContent='A polygon needs at least 3 vertices.';return;}
+    const poly=board.create('polygon',polygonPts,{withLines:true,fillColor:'#fecaca',fillOpacity:.12,borders:{strokeColor:'#dc2626',strokeWidth:2.4},vertices:{visible:true}});
+    addGroup([poly,...polygonPts]); polygonPts=[]; status.textContent='Polygon added. Choose another tool or start another polygon.';
+  };
+  const deleteUnder=(ev)=>{
+    let hits=[]; try{hits=board.getAllUnderMouse(ev)||[];}catch(_){ }
+    const hit=hits.find(o=>studentObjects.has(o));
+    if(hit){ const idx=groups.findIndex(g=>g.includes(hit)); if(idx>=0){const [g]=groups.splice(idx,1);removeObjects(g);} else removeObjects([hit]); status.textContent='Construction deleted.'; }
+    else { status.textContent='Tap a red construction to delete it. If selection is difficult, use Undo.'; }
+  };
+  const addAngleMeasure=(a,v,b)=>{
+    const ang=board.create('angle',[a,v,b],{...lineStyle,radius:.7,fillColor:'#fee2e2',fillOpacity:.18,name:'',withLabel:false});
+    const txt=board.create('text',[()=>v.X()+0.55,()=>v.Y()+0.55,()=>`${(ang.Value()*180/Math.PI).toFixed(1)}°`],{fixed:true,fontSize:13,color:'#b91c1c'});
+    addGroup([a,v,b,ang,txt]);
+  };
+  const addDistance=(a,b)=>{
+    const seg=board.create('segment',[a,b],{...lineStyle,dash:2});
+    const txt=board.create('text',[()=> (a.X()+b.X())/2,()=> (a.Y()+b.Y())/2,()=> length(a,b).toFixed(2)],{fixed:true,fontSize:13,color:'#b91c1c'});
+    addGroup([a,b,seg,txt]);
+  };
+  const handlePointTool=(xy)=>{ const p=mkPoint(xy); addGroup([p]); };
+  const handleMulti=(xy)=>{
+    const p=mkPoint(xy); picks.push(p);
+    const need=(['perpendicular','parallel','angle'].includes(tool)?3:2);
+    status.textContent=`${picks.length}/${need} point${need===1?'':'s'} selected.`;
+    if(picks.length<need) return;
+    const [a,b,c]=picks; picks=[];
+    if(tool==='line'){const o=board.create('line',[a,b],{...lineStyle,straightFirst:true,straightLast:true});addGroup([a,b,o]);}
+    else if(tool==='segment'){const o=board.create('segment',[a,b],lineStyle);addGroup([a,b,o]);}
+    else if(tool==='ray'){const o=board.create('line',[a,b],{...lineStyle,straightFirst:false,straightLast:true});addGroup([a,b,o]);}
+    else if(tool==='vector'){const o=board.create('arrow',[a,b],lineStyle);addGroup([a,b,o]);}
+    else if(tool==='circle'){const o=board.create('circle',[a,b],{...lineStyle,fillOpacity:0});addGroup([a,b,o]);}
+    else if(tool==='midpoint'){const m=board.create('midpoint',[a,b],{...pointStyle,fillColor:'#fef3c7',strokeColor:'#d97706'});addGroup([a,b,m]);}
+    else if(tool==='distance') addDistance(a,b);
+    else if(tool==='angle') addAngleMeasure(a,b,c);
+    else if(tool==='perpendicular'){
+      const base=board.create('line',[a,b],{...lineStyle,strokeColor:'#94a3b8',strokeWidth:1.6,dash:2});
+      const perp=board.create('perpendicular',[base,c],{...lineStyle}); addGroup([a,b,c,base,perp]);
+    }
+    else if(tool==='parallel'){
+      const base=board.create('line',[a,b],{...lineStyle,strokeColor:'#94a3b8',strokeWidth:1.6,dash:2});
+      const para=board.create('parallel',[base,c],{...lineStyle}); addGroup([a,b,c,base,para]);
+    }
+    status.textContent=(statusMap[tool]||'Construction added.')+' Construction added.';
+  };
+  const clickHandler=(ev)=>{
+    const b=ev.target.closest('button[data-tool]'); if(!b)return;
+    const name=b.dataset.tool;
+    if(name==='clear'){clear();status.textContent='Your constructions were cleared.';return;}
+    if(name==='undo'){undo();status.textContent='Last construction removed.';return;}
+    if(name==='finish'){finishPolygon();return;}
+    if(name==='snap'){snap=!snap;b.classList.toggle('active',snap);b.textContent=snap?'Snap 0.5':'Snap off';status.textContent=snap?'Coordinate snapping is on (0.5 units).':'Coordinate snapping is off.';return;}
+    setTool(name);
+  };
+  toolbar.addEventListener('click',clickHandler);
+  const downHandler=(ev)=>{
+    if(tool==='move')return;
+    if(tool==='delete'){deleteUnder(ev);return;}
+    const xy=coords(ev);
+    if(tool==='point'){handlePointTool(xy);return;}
+    if(tool==='polygon'){const p=mkPoint(xy);polygonPts.push(p);status.textContent=`Polygon: ${polygonPts.length} vertices. Add more or press Finish.`;board.update();return;}
+    handleMulti(xy);
+    board.update();
+  };
+  board.on('down',downHandler);
+  setTool('move');
+  return ()=>{ try{toolbar.removeEventListener('click',clickHandler);}catch(_){ } };
+}
+
 export default async function(component){
   const {parentElement,data}=component;
   const stage=parentElement.querySelector('.omt-visual2d-board');
-  const toolbar=parentElement.querySelector('.omt-practice-toolbar');
-  const status=parentElement.querySelector('.omt-practice-status');
+  const toolbar=parentElement.querySelector('.omt-gg-toolbar');
+  const status=parentElement.querySelector('.omt-gg-status');
   const scene=data?.scene||{};
   let JXG;
   try{JXG=await loadJXG();}catch(err){console.error(err);stage.textContent='Interactive maths workspace could not load.';return;}
@@ -1601,30 +1827,16 @@ export default async function(component){
     board.create('curve',[xs,ys],{fixed:true,highlight:false,strokeColor:'#475569',strokeWidth:2.3,dash:poly.dashed?2:0});
   }
   for(const c of(scene.circles||[])){
-    const center=pts.get(c.center);if(!center)continue;
-    board.create('circle',[center,Number(c.radius)],{fixed:true,highlight:false,strokeColor:'#475569',strokeWidth:2.2,fillOpacity:0});
+    const center=pts.get(c.center);if(center)board.create('circle',[center,Number(c.radius)],{fixed:true,highlight:false,strokeColor:'#475569',strokeWidth:2.2,fillOpacity:0});
+    else if(Number.isFinite(Number(c.center_x))&&Number.isFinite(Number(c.center_y)))board.create('circle',[[Number(c.center_x),Number(c.center_y)],Number(c.radius)],{fixed:true,highlight:false,strokeColor:'#475569',strokeWidth:2.2,fillOpacity:0});
   }
   for(const a of(scene.angles||[])){
     const p1=pts.get(a.arm1),v=pts.get(a.vertex),p2=pts.get(a.arm2);if(!p1||!v||!p2)continue;
     board.create('angle',[p1,v,p2],{name:a.label||'',withLabel:Boolean(a.label),fixed:true,highlight:false,radius:Number(a.radius||.7),strokeColor:'#2563eb',fillColor:'#dbeafe',fillOpacity:.35,label:{fontSize:13}});
   }
-  const student=[]; let tool='move', first=null;
-  const setTool=(name)=>{tool=name;first=null;toolbar.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===name));status.textContent=name==='point'?'Tap the grid to plot a point. Drag your plotted points to adjust them.':name==='segment'?'Tap two positions to draw a segment.':'Drag to pan/explore. Use the mouse wheel or pinch gesture to zoom.';};
-  const clearStudent=()=>{for(const o of student.splice(0))try{board.removeObject(o);}catch(_){ } first=null;board.update();};
-  toolbar.onclick=(ev)=>{const b=ev.target.closest('button[data-tool]');if(!b)return;const name=b.dataset.tool;if(name==='clear'){clearStudent();return;}setTool(name);};
-  board.on('down',(ev)=>{
-    if(tool==='move')return;
-    const c=new JXG.Coords(JXG.COORDS_BY_SCREEN,[ev.offsetX,ev.offsetY],board);const x=c.usrCoords[1],y=c.usrCoords[2];
-    if(tool==='point'){
-      const p=board.create('point',[x,y],{name:'',fixed:false,size:4,strokeColor:'#dc2626',fillColor:'#fee2e2',strokeWidth:2});student.push(p);board.update();return;
-    }
-    if(tool==='segment'){
-      if(!first){first=board.create('point',[x,y],{name:'',fixed:false,size:4,strokeColor:'#dc2626',fillColor:'#fee2e2'});student.push(first);status.textContent='Now tap the second endpoint.';}
-      else{const p2=board.create('point',[x,y],{name:'',fixed:false,size:4,strokeColor:'#dc2626',fillColor:'#fee2e2'});const s=board.create('segment',[first,p2],{fixed:false,strokeColor:'#dc2626',strokeWidth:2.6});student.push(p2,s);first=null;status.textContent='Segment added. Tap two more positions to add another.';}board.update();
-    }
-  });
-  if(!graphMode){toolbar.querySelector('[data-tool="point"]').style.display='none';toolbar.querySelector('[data-tool="segment"]').style.display='none';status.textContent='Use the schematic to understand the geometry. Drag to pan and pinch/wheel to zoom.';}
-  setTool('move');
+  installGeoTools(board,toolbar,status,JXG);
+  status.textContent=graphMode?'Plot points, draw lines, measure angles/distances, or pan/zoom the coordinate plane.':'Use the construction tools to explore the geometry. The given diagram remains fixed.';
+  board.update();
 }
 """
 
