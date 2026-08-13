@@ -786,10 +786,17 @@ export default async function(component) {
   const step = data?.step || {};
   const highlight = new Set(step.highlight_ids || []);
   const dim = new Set(step.dim_ids || []);
-  const animate = new Set(data?.animate_ids || step.animate_ids || []);
+  const animate = new Set([...(step.highlight_ids || []), ...(data?.animate_ids || step.animate_ids || [])]);
   const revealMode = Boolean(data?.reveal_mode);
   const visible = new Set(data?.visible_ids || []);
   const isVisible = (id) => !revealMode || visible.has(id) || highlight.has(id) || animate.has(id);
+  // Replay/Next must always produce visible motion. If this step contains no
+  // explicit construction action, replay the currently visible construction.
+  if (animate.size === 0 && Number(data?.animation_nonce || 0) > 0) {
+    for (const group of [scene.points || [], scene.segments || [], scene.polylines || [], scene.circles || [], scene.angles || []]) {
+      for (const item of group) if (isVisible(item.id)) animate.add(item.id);
+    }
+  }
   let JXG;
   try { JXG = await loadJXG(); } catch (err) { console.error('JSXGraph load failed', err); stage.textContent = 'Interactive 2D visual could not load. Reload once; if this persists, the JSXGraph library may be blocked by the network.'; return; }
 
@@ -942,9 +949,16 @@ export default async function(component) {
   const stage=parentElement.querySelector('.omt-visual3d-stage');
   const sceneData=data?.scene||{}, step=data?.step||{};
   const highlight=new Set(step.highlight_ids||[]), dim=new Set(step.dim_ids||[]);
-  const animate=new Set(data?.animate_ids||step.animate_ids||[]);
+  const animate=new Set([...(step.highlight_ids||[]), ...(data?.animate_ids||step.animate_ids||[])]);
   const revealMode=Boolean(data?.reveal_mode), visible=new Set(data?.visible_ids||[]);
   const isVisible=(id)=>!revealMode||visible.has(id)||highlight.has(id)||animate.has(id);
+  // Guarantee a visible replay even when the model did not mark a construction
+  // action for this step: animate the currently visible vertices/edges.
+  if(animate.size===0 && Number(data?.animation_nonce||0)>0){
+    for(const group of [sceneData.vertices||[],sceneData.edges||[],sceneData.faces||[],sceneData.angles||[]]){
+      for(const item of group) if(isVisible(item.id)) animate.add(item.id);
+    }
+  }
   if(parentElement.__omtThreeCleanup) parentElement.__omtThreeCleanup();
   stage.replaceChildren();
 
@@ -1072,19 +1086,44 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
     idx = max(0, min(int(st.session_state.get("ai_visual_step", 0)), max_index))
     st.session_state.ai_visual_step = idx
 
+    def _go_previous() -> None:
+        current = int(st.session_state.get("ai_visual_step", 0))
+        st.session_state.ai_visual_step = max(0, current - 1)
+        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
+
+    def _go_next() -> None:
+        current = int(st.session_state.get("ai_visual_step", 0))
+        st.session_state.ai_visual_step = min(max_index, current + 1)
+        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
+
+    def _replay_current() -> None:
+        # The nonce is sent through component data. Streamlit Components v2 calls
+        # the frontend renderer again whenever data changes, so this reliably
+        # restarts the current construction without changing the selected step.
+        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
+
     b1, mid, b2, replay = st.columns([1, 1.7, 1, 1])
-    if b1.button("← Previous", disabled=idx <= 0, use_container_width=True, key="ai_visual_prev"):
-        st.session_state.ai_visual_step = max(0, idx - 1)
-        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
-        st.rerun()
+    b1.button(
+        "← Previous",
+        disabled=idx <= 0,
+        use_container_width=True,
+        key="ai_visual_prev",
+        on_click=_go_previous,
+    )
     mid.markdown(f"<div style='text-align:center;padding:.55rem'><strong>Step {idx + 1} of {len(plan.steps)}</strong></div>", unsafe_allow_html=True)
-    if b2.button("Next →", disabled=idx >= max_index, use_container_width=True, key="ai_visual_next"):
-        st.session_state.ai_visual_step = min(max_index, idx + 1)
-        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
-        st.rerun()
-    if replay.button("↻ Replay", use_container_width=True, key="ai_visual_replay"):
-        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
-        st.rerun()
+    b2.button(
+        "Next →",
+        disabled=idx >= max_index,
+        use_container_width=True,
+        key="ai_visual_next",
+        on_click=_go_next,
+    )
+    replay.button(
+        "↻ Replay",
+        use_container_width=True,
+        key="ai_visual_replay",
+        on_click=_replay_current,
+    )
 
     step = plan.steps[idx]
     # New plans progressively reveal the construction. Old saved plans without reveal/animate
@@ -1119,7 +1158,7 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
             _visual_2d_component(
                 data={"scene": scene_payload, **component_data},
                 default={},
-                key=f"ai_visual2d_{replay_nonce}",
+                key="ai_visual2d",
                 width="stretch",
                 height="content",
             )
@@ -1131,7 +1170,7 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
             _visual_3d_component(
                 data={"scene": scene_payload, **component_data},
                 default={},
-                key=f"ai_visual3d_{replay_nonce}",
+                key="ai_visual3d",
                 width="stretch",
                 height="content",
             )
@@ -1142,6 +1181,8 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
     st.caption(f"Matches corrected solution step {getattr(step, 'source_step_index', idx + 1)}")
     if getattr(step, "simulation_note", ""):
         st.info("Simulation: " + step.simulation_note)
+    if not (getattr(step, "animate_ids", []) or getattr(step, "highlight_ids", []) or getattr(step, "reveal_ids", [])):
+        st.caption("This corrected step is mainly algebraic, so no new diagram object is introduced. Replay redraws the current construction for orientation.")
     st.markdown("**Matching corrected step**")
     for formula in step.math:
         render_mathio(formula)

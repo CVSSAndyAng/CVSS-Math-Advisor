@@ -744,6 +744,15 @@ def _sanitize_visual_explanation(result: VisualExplanationResult) -> VisualExpla
         step.dim_ids = [item for item in step.dim_ids if item in valid_ids and item not in step.highlight_ids]
         step.reveal_ids = [item for item in step.reveal_ids if item in valid_ids]
         step.animate_ids = [item for item in step.animate_ids if item in valid_ids]
+
+        # Animation must never depend entirely on the model remembering animate_ids.
+        # If a step identifies visual focus but omits an explicit animation list,
+        # animate the focused primitives. This also makes Replay visibly replay.
+        if not step.animate_ids and step.highlight_ids:
+            step.animate_ids = list(step.highlight_ids)
+        if not step.reveal_ids and step.animate_ids:
+            step.reveal_ids = list(step.animate_ids)
+
         if len(step.camera_position) not in {0, 3}:
             step.camera_position = []
         if len(step.camera_target) not in {0, 3}:
@@ -869,6 +878,8 @@ STEP-BY-STEP PEDAGOGY — STRICT ALIGNMENT
 - For a gradient step, visually reveal the horizontal/vertical change or relevant pair of points before showing the gradient calculation where possible.
 - For geometry, animate the segment/diagonal/angle that the corrected step introduces rather than merely highlighting the completed figure.
 - simulation_note must state the concrete visual action for the current step in student-friendly language.
+- EVERY visual step that changes or uses the diagram/graph must include at least one valid highlight_id.
+- EVERY step that introduces, plots, draws, traces, constructs, or reveals an object must put that primitive id in animate_ids. Do not leave animate_ids empty for a genuine visual construction step.
 - highlight_ids must name the visual primitives central to the corresponding corrected step.
 - dim_ids may de-emphasize irrelevant edges/faces so the relevant relationship becomes obvious.
 - For 3D, use camera_position/camera_target when a viewpoint materially clarifies that corrected step; use a different viewpoint across steps only when it helps reveal the required section/angle.
@@ -913,7 +924,10 @@ Return a useful visual only when it is mathematically justified by the question.
         raise _translate_exception(exc) from exc
 
     result = _sanitize_visual_explanation(result)
-    return _align_visual_steps_to_corrected_path(result, analysis)
+    result = _align_visual_steps_to_corrected_path(result, analysis)
+    # Alignment can synthesize a missing step. Sanitize once more so every aligned
+    # step receives the same replay/reveal fallbacks and only references valid ids.
+    return _sanitize_visual_explanation(result)
 
 def _validate_practice_question_completeness(question: TargetedPracticeQuestion) -> None:
     """Reject practice items whose reference material does not cover all required parts."""
