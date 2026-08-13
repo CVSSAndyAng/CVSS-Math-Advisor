@@ -764,6 +764,21 @@ function styleFor(id, highlight, dim, kind='line') {
   return { strokeColor: hi ? '#dc2626' : (low ? '#cbd5e1' : '#475569'), strokeWidth: hi ? 4 : 2.2, opacity: low ? 0.28 : 0.95 };
 }
 
+function pulsePoint(board, point, targetSize, targetOpacity) {
+  const start = performance.now();
+  const duration = 620;
+  const tick = (now) => {
+    const t = Math.min(1, (now - start) / duration);
+    const ease = 1 - Math.pow(1 - t, 3);
+    const size = 0.7 + (targetSize * 1.25 - 0.7) * ease;
+    point.setAttribute({ size, opacity: Math.max(0.05, targetOpacity * ease) });
+    board.update();
+    if (t < 1) requestAnimationFrame(tick);
+    else { point.setAttribute({ size: targetSize, opacity: targetOpacity }); board.update(); }
+  };
+  requestAnimationFrame(tick);
+}
+
 export default async function(component) {
   const { parentElement, data } = component;
   const stage = parentElement.querySelector('.omt-visual2d-board');
@@ -771,6 +786,10 @@ export default async function(component) {
   const step = data?.step || {};
   const highlight = new Set(step.highlight_ids || []);
   const dim = new Set(step.dim_ids || []);
+  const animate = new Set(data?.animate_ids || step.animate_ids || []);
+  const revealMode = Boolean(data?.reveal_mode);
+  const visible = new Set(data?.visible_ids || []);
+  const isVisible = (id) => !revealMode || visible.has(id) || highlight.has(id) || animate.has(id);
   let JXG;
   try { JXG = await loadJXG(); } catch (err) { console.error('JSXGraph load failed', err); stage.textContent = 'Interactive 2D visual could not load. Reload once; if this persists, the JSXGraph library may be blocked by the network.'; return; }
 
@@ -790,54 +809,88 @@ export default async function(component) {
   });
   parentElement.__omtBoard = board;
 
+  // If a visible construction depends on endpoints/angle arms, show those points too.
+  const neededPoints = new Set();
+  for (const seg of (scene.segments || [])) if (isVisible(seg.id)) { neededPoints.add(seg.start); neededPoints.add(seg.end); }
+  for (const ang of (scene.angles || [])) if (isVisible(ang.id)) { neededPoints.add(ang.arm1); neededPoints.add(ang.vertex); neededPoints.add(ang.arm2); }
+
   const pts = new Map();
   for (const p of (scene.points || [])) {
     const st = styleFor(p.id, highlight, dim, 'point');
+    const show = isVisible(p.id) || neededPoints.has(p.id);
     const obj = board.create('point', [Number(p.x), Number(p.y)], {
-      name: p.label || '', fixed: true, highlight: false, withLabel: Boolean(p.label),
-      strokeColor: st.strokeColor, fillColor: st.fillColor, opacity: st.opacity, size: st.size,
+      name: p.label || '', fixed: true, highlight: false, withLabel: show && Boolean(p.label), visible: show,
+      strokeColor: st.strokeColor, fillColor: st.fillColor, opacity: animate.has(p.id) ? 0.04 : st.opacity,
+      size: animate.has(p.id) ? 0.7 : st.size,
       label: { fontSize: 14, offset: [7, 7] },
     });
     pts.set(p.id, obj);
+    if (show && animate.has(p.id)) pulsePoint(board, obj, st.size, st.opacity);
   }
 
   for (const seg of (scene.segments || [])) {
+    if (!isVisible(seg.id)) continue;
     const a = pts.get(seg.start), b = pts.get(seg.end); if (!a || !b) continue;
     const st = styleFor(seg.id, highlight, dim);
-    board.create('segment', [a,b], {
-      name: seg.label || '', withLabel: Boolean(seg.label), fixed: true, highlight: false,
+    const attrs = {
+      name: seg.label || '', withLabel: Boolean(seg.label) && !animate.has(seg.id), fixed: true, highlight: false,
       strokeColor: st.strokeColor, strokeWidth: st.strokeWidth, opacity: st.opacity,
       dash: seg.dashed ? 2 : 0, label: { fontSize: 13 },
-    });
+    };
+    if (animate.has(seg.id)) {
+      const mover = board.create('point', [a.X(), a.Y()], { visible:false, fixed:true, name:'' });
+      board.create('segment', [a, mover], attrs);
+      setTimeout(() => mover.moveTo([b.X(), b.Y()], 900), 90);
+      if (seg.label) setTimeout(() => board.create('text', [(a.X()+b.X())/2, (a.Y()+b.Y())/2, seg.label], {fixed:true, fontSize:13, color:st.strokeColor}), 980);
+    } else {
+      board.create('segment', [a,b], attrs);
+    }
   }
 
   for (const poly of (scene.polylines || [])) {
+    if (!isVisible(poly.id)) continue;
     const samples = Array.isArray(poly.points) ? poly.points.filter(v => Array.isArray(v) && v.length >= 2) : [];
     if (samples.length < 2) continue;
     const st = styleFor(poly.id, highlight, dim);
-    const xs = samples.map(v => Number(v[0])), ys = samples.map(v => Number(v[1]));
-    board.create('curve', [xs, ys], { fixed: true, highlight: false, strokeColor: st.strokeColor, strokeWidth: st.strokeWidth, opacity: st.opacity, dash: poly.dashed ? 2 : 0 });
-    if (poly.label) {
-      const m = samples[Math.floor(samples.length/2)];
-      board.create('text', [Number(m[0]), Number(m[1]), poly.label], { fixed:true, fontSize:13, color: st.strokeColor });
+    if (animate.has(poly.id)) {
+      const delay = Math.max(18, Math.min(90, 850 / Math.max(1, samples.length - 1)));
+      samples.slice(0, -1).forEach((a, i) => {
+        const b = samples[i + 1];
+        setTimeout(() => board.create('segment', [[Number(a[0]),Number(a[1])],[Number(b[0]),Number(b[1])]], {
+          fixed:true, highlight:false, strokeColor:st.strokeColor, strokeWidth:st.strokeWidth, opacity:st.opacity, dash:poly.dashed ? 2 : 0,
+        }), 80 + i * delay);
+      });
+      if (poly.label) {
+        const m = samples[Math.floor(samples.length/2)];
+        setTimeout(() => board.create('text', [Number(m[0]), Number(m[1]), poly.label], { fixed:true, fontSize:13, color: st.strokeColor }), 120 + samples.length * delay);
+      }
+    } else {
+      const xs = samples.map(v => Number(v[0])), ys = samples.map(v => Number(v[1]));
+      board.create('curve', [xs, ys], { fixed:true, highlight:false, strokeColor:st.strokeColor, strokeWidth:st.strokeWidth, opacity:st.opacity, dash:poly.dashed ? 2 : 0 });
+      if (poly.label) {
+        const m = samples[Math.floor(samples.length/2)];
+        board.create('text', [Number(m[0]), Number(m[1]), poly.label], { fixed:true, fontSize:13, color: st.strokeColor });
+      }
     }
   }
 
   for (const c of (scene.circles || [])) {
+    if (!isVisible(c.id)) continue;
     const st = styleFor(c.id, highlight, dim);
-    const circle = board.create('circle', [[Number(c.center_x), Number(c.center_y)], Number(c.radius)], {
-      fixed:true, highlight:false, strokeColor: st.strokeColor, strokeWidth: st.strokeWidth, opacity: st.opacity,
-      fillOpacity: 0, name: c.label || '', withLabel: Boolean(c.label),
+    board.create('circle', [[Number(c.center_x), Number(c.center_y)], Number(c.radius)], {
+      fixed:true, highlight:false, strokeColor:st.strokeColor, strokeWidth:st.strokeWidth, opacity:animate.has(c.id) ? 0.25 : st.opacity,
+      fillOpacity:0, name:c.label || '', withLabel:Boolean(c.label),
     });
   }
 
   for (const ang of (scene.angles || [])) {
+    if (!isVisible(ang.id)) continue;
     const a = pts.get(ang.arm1), v = pts.get(ang.vertex), c = pts.get(ang.arm2); if (!a || !v || !c) continue;
     const st = styleFor(ang.id, highlight, dim);
     board.create('angle', [a,v,c], {
-      name: ang.label || '', withLabel: Boolean(ang.label), fixed:true, highlight:false,
-      strokeColor: st.strokeColor, fillColor: st.strokeColor, fillOpacity: highlight.has(ang.id) ? 0.16 : 0.06,
-      strokeWidth: st.strokeWidth, radius: 0.55, label: { fontSize: 13 },
+      name:ang.label || '', withLabel:Boolean(ang.label), fixed:true, highlight:false,
+      strokeColor:st.strokeColor, fillColor:st.strokeColor, fillOpacity:highlight.has(ang.id) ? 0.16 : 0.06,
+      strokeWidth:st.strokeWidth, radius:0.55, label:{fontSize:13},
     });
   }
   board.update();
@@ -871,83 +924,98 @@ async function loadThree() {
 
 function textSprite(THREE, text, color='#0f172a') {
   if (!text) return null;
-  const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 128;
-  const ctx = canvas.getContext('2d'); ctx.clearRect(0,0,512,128); ctx.font = '52px system-ui, sans-serif'; ctx.fillStyle=color; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(text,256,64);
-  const texture = new THREE.CanvasTexture(canvas); texture.minFilter = THREE.LinearFilter;
-  const material = new THREE.SpriteMaterial({ map:texture, transparent:true, depthTest:false });
-  const sprite = new THREE.Sprite(material); sprite.scale.set(1.6,0.4,1); sprite.userData.__texture = texture; return sprite;
+  const canvas=document.createElement('canvas'); canvas.width=512; canvas.height=128;
+  const ctx=canvas.getContext('2d'); ctx.clearRect(0,0,512,128); ctx.font='52px system-ui, sans-serif'; ctx.fillStyle=color; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(text,256,64);
+  const texture=new THREE.CanvasTexture(canvas); texture.minFilter=THREE.LinearFilter;
+  const material=new THREE.SpriteMaterial({map:texture,transparent:true,depthTest:false});
+  const sprite=new THREE.Sprite(material); sprite.scale.set(1.6,0.4,1); sprite.userData.__texture=texture; return sprite;
 }
 
-function edgeMaterial(THREE, id, highlight, dim, dashed=false) {
+function edgeMaterial(THREE,id,highlight,dim,dashed=false){
   const hi=highlight.has(id), low=dim.has(id); const color=hi?0xdc2626:(low?0xcbd5e1:0x334155); const opacity=low?0.22:0.95;
-  if (dashed) return new THREE.LineDashedMaterial({ color, transparent:true, opacity, dashSize:.18, gapSize:.1, linewidth: hi?3:1 });
-  return new THREE.LineBasicMaterial({ color, transparent:true, opacity, linewidth: hi?3:1 });
+  if(dashed) return new THREE.LineDashedMaterial({color,transparent:true,opacity,dashSize:.18,gapSize:.1,linewidth:hi?3:1});
+  return new THREE.LineBasicMaterial({color,transparent:true,opacity,linewidth:hi?3:1});
 }
 
 export default async function(component) {
-  const { parentElement, data } = component;
-  const stage = parentElement.querySelector('.omt-visual3d-stage');
-  const sceneData = data?.scene || {}, step = data?.step || {};
-  const highlight = new Set(step.highlight_ids || []), dim = new Set(step.dim_ids || []);
-  if (parentElement.__omtThreeCleanup) parentElement.__omtThreeCleanup();
+  const {parentElement,data}=component;
+  const stage=parentElement.querySelector('.omt-visual3d-stage');
+  const sceneData=data?.scene||{}, step=data?.step||{};
+  const highlight=new Set(step.highlight_ids||[]), dim=new Set(step.dim_ids||[]);
+  const animate=new Set(data?.animate_ids||step.animate_ids||[]);
+  const revealMode=Boolean(data?.reveal_mode), visible=new Set(data?.visible_ids||[]);
+  const isVisible=(id)=>!revealMode||visible.has(id)||highlight.has(id)||animate.has(id);
+  if(parentElement.__omtThreeCleanup) parentElement.__omtThreeCleanup();
   stage.replaceChildren();
 
-  let THREE, OrbitControls;
-  try { ({THREE, OrbitControls} = await loadThree()); } catch (err) { stage.textContent='Interactive 3D visual could not load.'; return; }
+  let THREE,OrbitControls;
+  try{({THREE,OrbitControls}=await loadThree());}catch(err){stage.textContent='Interactive 3D visual could not load.';return;}
 
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 1000);
-  const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setClearColor(0xffffff, 0);
-  stage.appendChild(renderer.domElement);
-  const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping=true; controls.dampingFactor=.08; controls.enablePan=true;
+  const scene=new THREE.Scene();
+  const camera=new THREE.PerspectiveCamera(42,1,.01,1000);
+  const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true}); renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2)); renderer.setClearColor(0xffffff,0); stage.appendChild(renderer.domElement);
+  const controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.dampingFactor=.08; controls.enablePan=true;
 
-  const vertices = new Map(); const coords = [];
-  for (const v of (sceneData.vertices || [])) {
-    const pos = new THREE.Vector3(Number(v.x),Number(v.y),Number(v.z)); coords.push(pos); vertices.set(v.id,pos);
-    const hi=highlight.has(v.id), low=dim.has(v.id);
-    const geom=new THREE.SphereGeometry(hi ? .09 : .07,18,12);
-    const mat=new THREE.MeshBasicMaterial({color:hi?0xdc2626:(low?0xcbd5e1:0x0f172a),transparent:true,opacity:low ? .28 : 1});
-    const mesh=new THREE.Mesh(geom,mat); mesh.position.copy(pos); scene.add(mesh);
-    const label=textSprite(THREE,v.label||v.id,hi?'#dc2626':'#0f172a'); if(label){ label.position.copy(pos).add(new THREE.Vector3(.12,.16,.08)); scene.add(label); }
+  const vertices=new Map(), coords=[];
+  for(const v of (sceneData.vertices||[])){const pos=new THREE.Vector3(Number(v.x),Number(v.y),Number(v.z));coords.push(pos);vertices.set(v.id,pos);}
+  const neededVertices=new Set();
+  for(const e of (sceneData.edges||[])) if(isVisible(e.id)){neededVertices.add(e.start);neededVertices.add(e.end);}
+  for(const f of (sceneData.faces||[])) if(isVisible(f.id)) for(const id of (f.vertices||[])) neededVertices.add(id);
+  for(const a of (sceneData.angles||[])) if(isVisible(a.id)){neededVertices.add(a.arm1);neededVertices.add(a.vertex);neededVertices.add(a.arm2);}
+
+  for(const v of (sceneData.vertices||[])){
+    if(!isVisible(v.id)&&!neededVertices.has(v.id)) continue;
+    const pos=vertices.get(v.id), hi=highlight.has(v.id), low=dim.has(v.id);
+    const geom=new THREE.SphereGeometry(hi?.09:.07,18,12); const mat=new THREE.MeshBasicMaterial({color:hi?0xdc2626:(low?0xcbd5e1:0x0f172a),transparent:true,opacity:animate.has(v.id)?.08:(low?.28:1)});
+    const mesh=new THREE.Mesh(geom,mat);mesh.position.copy(pos);scene.add(mesh);
+    const label=textSprite(THREE,v.label||v.id,hi?'#dc2626':'#0f172a');if(label){label.position.copy(pos).add(new THREE.Vector3(.12,.16,.08));scene.add(label);}
   }
 
-  for (const e of (sceneData.edges || [])) {
-    const a=vertices.get(e.start), b=vertices.get(e.end); if(!a||!b) continue;
-    const geom=new THREE.BufferGeometry().setFromPoints([a,b]); const mat=edgeMaterial(THREE,e.id,highlight,dim,Boolean(e.dashed));
-    const line=new THREE.Line(geom,mat); if(e.dashed) line.computeLineDistances(); scene.add(line);
-    if(e.label){ const m=a.clone().add(b).multiplyScalar(.5); const sp=textSprite(THREE,e.label,highlight.has(e.id)?'#dc2626':'#334155'); if(sp){sp.position.copy(m).add(new THREE.Vector3(.08,.08,.08)); scene.add(sp);} }
+  const edgeTweens=[];
+  for(const e of (sceneData.edges||[])){
+    if(!isVisible(e.id)) continue;
+    const a=vertices.get(e.start),b=vertices.get(e.end);if(!a||!b)continue;
+    const mat=edgeMaterial(THREE,e.id,highlight,dim,Boolean(e.dashed));
+    if(animate.has(e.id)){
+      const arr=new Float32Array([a.x,a.y,a.z,a.x,a.y,a.z]);
+      const geom=new THREE.BufferGeometry();geom.setAttribute('position',new THREE.BufferAttribute(arr,3));
+      const line=new THREE.Line(geom,mat);scene.add(line);edgeTweens.push({attr:geom.getAttribute('position'),a:a.clone(),b:b.clone(),start:performance.now()+80,duration:900,line});
+    }else{
+      const geom=new THREE.BufferGeometry().setFromPoints([a,b]);const line=new THREE.Line(geom,mat);if(e.dashed)line.computeLineDistances();scene.add(line);
+    }
+    if(e.label){const m=a.clone().add(b).multiplyScalar(.5);const sp=textSprite(THREE,e.label,highlight.has(e.id)?'#dc2626':'#334155');if(sp){sp.position.copy(m).add(new THREE.Vector3(.08,.08,.08));scene.add(sp);}}
   }
 
-  for (const f of (sceneData.faces || [])) {
-    const vv=(f.vertices||[]).map(id=>vertices.get(id)).filter(Boolean); if(vv.length<3) continue;
-    const arr=[]; for(let i=1;i<vv.length-1;i++){ for(const p of [vv[0],vv[i],vv[i+1]]) arr.push(p.x,p.y,p.z); }
-    const geom=new THREE.BufferGeometry(); geom.setAttribute('position',new THREE.Float32BufferAttribute(arr,3)); geom.computeVertexNormals();
-    const hi=highlight.has(f.id), low=dim.has(f.id); const mat=new THREE.MeshBasicMaterial({color:hi?0xfca5a5:0x94a3b8,transparent:true,opacity:low ? .025 : (hi ? .16 : .055),side:THREE.DoubleSide,depthWrite:false});
-    scene.add(new THREE.Mesh(geom,mat));
+  for(const f of (sceneData.faces||[])){
+    if(!isVisible(f.id))continue;const vv=(f.vertices||[]).map(id=>vertices.get(id)).filter(Boolean);if(vv.length<3)continue;
+    const arr=[];for(let i=1;i<vv.length-1;i++){for(const p of[vv[0],vv[i],vv[i+1]])arr.push(p.x,p.y,p.z);}const geom=new THREE.BufferGeometry();geom.setAttribute('position',new THREE.Float32BufferAttribute(arr,3));geom.computeVertexNormals();
+    const hi=highlight.has(f.id),low=dim.has(f.id);const mat=new THREE.MeshBasicMaterial({color:hi?0xfca5a5:0x94a3b8,transparent:true,opacity:low?.025:(hi?.16:.055),side:THREE.DoubleSide,depthWrite:false});scene.add(new THREE.Mesh(geom,mat));
   }
 
-  for (const aDef of (sceneData.angles || [])) {
-    const pa=vertices.get(aDef.arm1), pv=vertices.get(aDef.vertex), pc=vertices.get(aDef.arm2); if(!pa||!pv||!pc) continue;
-    const u=pa.clone().sub(pv).normalize(), w=pc.clone().sub(pv).normalize(); const dot=THREE.MathUtils.clamp(u.dot(w),-1,1); const theta=Math.acos(dot); const sin=Math.sin(theta); if(theta<.02||Math.abs(sin)<1e-4) continue;
-    const tangent=w.clone().sub(u.clone().multiplyScalar(dot)).normalize(); const radius=.34; const samples=[];
-    for(let i=0;i<=28;i++){ const t=theta*i/28; samples.push(pv.clone().add(u.clone().multiplyScalar(Math.cos(t)*radius)).add(tangent.clone().multiplyScalar(Math.sin(t)*radius))); }
-    const geom=new THREE.BufferGeometry().setFromPoints(samples); const mat=edgeMaterial(THREE,aDef.id,highlight,dim,false); scene.add(new THREE.Line(geom,mat));
-    if(aDef.label){ const mid=samples[Math.floor(samples.length/2)]; const sp=textSprite(THREE,aDef.label,highlight.has(aDef.id)?'#dc2626':'#334155'); if(sp){sp.position.copy(mid);scene.add(sp);} }
+  for(const aDef of (sceneData.angles||[])){
+    if(!isVisible(aDef.id))continue;const pa=vertices.get(aDef.arm1),pv=vertices.get(aDef.vertex),pc=vertices.get(aDef.arm2);if(!pa||!pv||!pc)continue;
+    const u=pa.clone().sub(pv).normalize(),w=pc.clone().sub(pv).normalize(),dot=THREE.MathUtils.clamp(u.dot(w),-1,1),theta=Math.acos(dot),sin=Math.sin(theta);if(theta<.02||Math.abs(sin)<1e-4)continue;
+    const tangent=w.clone().sub(u.clone().multiplyScalar(dot)).normalize(),radius=.34,samples=[];for(let i=0;i<=28;i++){const t=theta*i/28;samples.push(pv.clone().add(u.clone().multiplyScalar(Math.cos(t)*radius)).add(tangent.clone().multiplyScalar(Math.sin(t)*radius)));}
+    const geom=new THREE.BufferGeometry().setFromPoints(samples),mat=edgeMaterial(THREE,aDef.id,highlight,dim,false);scene.add(new THREE.Line(geom,mat));
+    if(aDef.label){const mid=samples[Math.floor(samples.length/2)],sp=textSprite(THREE,aDef.label,highlight.has(aDef.id)?'#dc2626':'#334155');if(sp){sp.position.copy(mid);scene.add(sp);}}
   }
 
-  let center=new THREE.Vector3(0,0,0), radius=2;
-  if(coords.length){ const box=new THREE.Box3().setFromPoints(coords); center=box.getCenter(new THREE.Vector3()); radius=Math.max(box.getSize(new THREE.Vector3()).length()*.72,1.4); }
-  const cp=Array.isArray(step.camera_position)&&step.camera_position.length===3?step.camera_position:null;
-  const ct=Array.isArray(step.camera_target)&&step.camera_target.length===3?step.camera_target:null;
-  camera.position.set(...(cp?cp:[center.x+radius*1.35,center.y+radius*.9,center.z+radius*1.35]));
-  controls.target.set(...(ct?ct:[center.x,center.y,center.z])); camera.lookAt(controls.target); controls.update();
+  let center=new THREE.Vector3(0,0,0),radius=2;if(coords.length){const box=new THREE.Box3().setFromPoints(coords);center=box.getCenter(new THREE.Vector3());radius=Math.max(box.getSize(new THREE.Vector3()).length()*.72,1.4);}
+  const cp=Array.isArray(step.camera_position)&&step.camera_position.length===3?step.camera_position:null,ct=Array.isArray(step.camera_target)&&step.camera_target.length===3?step.camera_target:null;
+  const targetPos=new THREE.Vector3(...(cp?cp:[center.x+radius*1.35,center.y+radius*.9,center.z+radius*1.35]));
+  const targetLook=new THREE.Vector3(...(ct?ct:[center.x,center.y,center.z]));
+  const pcp=Array.isArray(data?.previous_camera_position)&&data.previous_camera_position.length===3?new THREE.Vector3(...data.previous_camera_position):targetPos.clone();
+  const pct=Array.isArray(data?.previous_camera_target)&&data.previous_camera_target.length===3?new THREE.Vector3(...data.previous_camera_target):targetLook.clone();
+  camera.position.copy(pcp);controls.target.copy(pct);camera.lookAt(controls.target);controls.update();
+  const camStart=performance.now(),camDuration=850;
 
-  const resize=()=>{ const w=Math.max(stage.clientWidth,320), h=Math.max(stage.clientHeight,360); renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix(); };
-  resize(); const ro=new ResizeObserver(resize); ro.observe(stage);
-  let raf=0; const animate=()=>{ raf=requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); }; animate();
-  parentElement.__omtThreeCleanup=()=>{ cancelAnimationFrame(raf); ro.disconnect(); controls.dispose(); scene.traverse(o=>{o.geometry?.dispose?.(); if(o.material){const mats=Array.isArray(o.material)?o.material:[o.material]; for(const m of mats){m.map?.dispose?.();m.dispose?.();}}}); renderer.dispose(); renderer.domElement.remove(); };
+  const resize=()=>{const w=Math.max(stage.clientWidth,320),h=Math.max(stage.clientHeight,360);renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();};resize();const ro=new ResizeObserver(resize);ro.observe(stage);
+  let raf=0;const animateFrame=(now)=>{raf=requestAnimationFrame(animateFrame);
+    const ctween=Math.min(1,(now-camStart)/camDuration);const ce=1-Math.pow(1-ctween,3);camera.position.lerpVectors(pcp,targetPos,ce);controls.target.lerpVectors(pct,targetLook,ce);
+    for(const tw of edgeTweens){const t=Math.max(0,Math.min(1,(now-tw.start)/tw.duration)),e=1-Math.pow(1-t,3),cur=tw.a.clone().lerp(tw.b,e);tw.attr.setXYZ(1,cur.x,cur.y,cur.z);tw.attr.needsUpdate=true;if(tw.line.material.isLineDashedMaterial)tw.line.computeLineDistances();}
+    controls.update();renderer.render(scene,camera);
+  };raf=requestAnimationFrame(animateFrame);
+  parentElement.__omtThreeCleanup=()=>{cancelAnimationFrame(raf);ro.disconnect();controls.dispose();scene.traverse(o=>{o.geometry?.dispose?.();if(o.material){const mats=Array.isArray(o.material)?o.material:[o.material];for(const m of mats){m.map?.dispose?.();m.dispose?.();}}});renderer.dispose();renderer.domElement.remove();};
 }
 """
 
@@ -996,7 +1064,7 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
     if not plan.steps:
         return
 
-    st.markdown("### Visual step-by-step explanation")
+    st.markdown("### Visual step-by-step simulation")
     st.caption(
         f"Reconstruction confidence: {plan.reconstruction_confidence.title()}. {plan.reconstruction_note}"
     )
@@ -1004,24 +1072,54 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
     idx = max(0, min(int(st.session_state.get("ai_visual_step", 0)), max_index))
     st.session_state.ai_visual_step = idx
 
-    b1, mid, b2 = st.columns([1, 2.1, 1])
+    b1, mid, b2, replay = st.columns([1, 1.7, 1, 1])
     if b1.button("← Previous", disabled=idx <= 0, use_container_width=True, key="ai_visual_prev"):
         st.session_state.ai_visual_step = max(0, idx - 1)
+        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
         st.rerun()
     mid.markdown(f"<div style='text-align:center;padding:.55rem'><strong>Step {idx + 1} of {len(plan.steps)}</strong></div>", unsafe_allow_html=True)
     if b2.button("Next →", disabled=idx >= max_index, use_container_width=True, key="ai_visual_next"):
         st.session_state.ai_visual_step = min(max_index, idx + 1)
+        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
+        st.rerun()
+    if replay.button("↻ Replay", use_container_width=True, key="ai_visual_replay"):
+        st.session_state.ai_visual_replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0)) + 1
         st.rerun()
 
     step = plan.steps[idx]
+    # New plans progressively reveal the construction. Old saved plans without reveal/animate
+    # fields continue to show the complete scene for backward compatibility.
+    reveal_mode = any(bool(getattr(item, "reveal_ids", [])) or bool(getattr(item, "animate_ids", [])) for item in plan.steps)
+    visible_ids: set[str] = set()
+    if reveal_mode:
+        for earlier in plan.steps[: idx + 1]:
+            visible_ids.update(getattr(earlier, "reveal_ids", []) or [])
+            visible_ids.update(getattr(earlier, "animate_ids", []) or [])
+        visible_ids.update(getattr(step, "highlight_ids", []) or [])
+    animate_ids = list(getattr(step, "animate_ids", []) or [])
+    replay_nonce = int(st.session_state.get("ai_visual_replay_nonce", 0))
+
+    previous_step = plan.steps[idx - 1] if idx > 0 else None
+    previous_camera_position = list(getattr(previous_step, "camera_position", []) or []) if previous_step else []
+    previous_camera_target = list(getattr(previous_step, "camera_target", []) or []) if previous_step else []
+
     scene_payload: dict[str, Any] | None = None
+    component_data = {
+        "step": step.model_dump(),
+        "visible_ids": sorted(visible_ids),
+        "animate_ids": animate_ids,
+        "reveal_mode": reveal_mode,
+        "animation_nonce": replay_nonce,
+        "previous_camera_position": previous_camera_position,
+        "previous_camera_target": previous_camera_target,
+    }
     if plan.mode in {"geometry2d", "graph2d"} and plan.scene_2d is not None:
         scene_payload = plan.scene_2d.model_dump()
         if _visual_2d_component is not None:
             _visual_2d_component(
-                data={"scene": scene_payload, "step": step.model_dump()},
+                data={"scene": scene_payload, **component_data},
                 default={},
-                key="ai_visual2d",
+                key=f"ai_visual2d_{replay_nonce}",
                 width="stretch",
                 height="content",
             )
@@ -1031,9 +1129,9 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
         scene_payload = plan.scene_3d.model_dump()
         if _visual_3d_component is not None:
             _visual_3d_component(
-                data={"scene": scene_payload, "step": step.model_dump()},
+                data={"scene": scene_payload, **component_data},
                 default={},
-                key="ai_visual3d",
+                key=f"ai_visual3d_{replay_nonce}",
                 width="stretch",
                 height="content",
             )
@@ -1042,14 +1140,17 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
 
     st.markdown(f"#### {step.title}")
     st.caption(f"Matches corrected solution step {getattr(step, 'source_step_index', idx + 1)}")
+    if getattr(step, "simulation_note", ""):
+        st.info("Simulation: " + step.simulation_note)
     st.markdown("**Matching corrected step**")
     for formula in step.math:
         render_mathio(formula)
-    st.markdown("**Why this visual matches the step**")
+    st.markdown("**Why this simulation matches the step**")
     render_mathio_mixed(step.explanation)
 
     if plan.mode == "geometry3d":
-        st.caption("iPad: drag with one finger to rotate the solid and pinch with two fingers to zoom. The simulation is explanatory and follows the stated geometry; it is not assumed to be drawn to scale unless the question says so.")
+        st.caption("iPad: drag with one finger to rotate the solid and pinch with two fingers to zoom. Use Replay to watch the current construction/camera movement again.")
+
 
 def init_state() -> None:
     defaults: dict[str, Any] = {
@@ -1065,6 +1166,7 @@ def init_state() -> None:
         "ai_visual_explanation": None,
         "ai_visual_error": "",
         "ai_visual_step": 0,
+        "ai_visual_replay_nonce": 0,
         "ai_fallback_result": None,
         "ai_question_detection": None,
         "ai_question_detection_error": "",

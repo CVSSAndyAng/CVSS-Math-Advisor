@@ -224,7 +224,11 @@ class VisualExplanationStep(BaseModel):
         description="1-based corrected-solution step that this visual step explains. Visual steps must follow the corrected path in the same order.",
     )
     title: str
-    explanation: str = Field(description="Concise student-facing explanation for this visual step; mathematical expressions must use \\( ... \\) transport delimiters so the app renders them in MathIO")
+    explanation: str = Field(description=r"Concise student-facing explanation for this visual step; mathematical expressions must use \( ... \) transport delimiters so the app renders them in MathIO")
+    simulation_note: str = Field(
+        default="",
+        description="Plain-language description of what the visual should actively simulate at this step, such as plotting a point, drawing a straight line, constructing an auxiliary diagonal, revealing a right triangle, or rotating a 3D solid.",
+    )
     math: list[str] = Field(
         default_factory=list,
         description=r"MathIO-ready raw LaTeX equations for this step, with no dollar-sign or \( \) delimiters",
@@ -236,6 +240,14 @@ class VisualExplanationStep(BaseModel):
     dim_ids: list[str] = Field(
         default_factory=list,
         description="Primitive ids to de-emphasize so the important geometry is easier to see",
+    )
+    reveal_ids: list[str] = Field(
+        default_factory=list,
+        description="Primitive ids that should first become visible at this corrected-solution step. Use cumulative reveal so the construction develops step by step rather than showing the finished diagram immediately.",
+    )
+    animate_ids: list[str] = Field(
+        default_factory=list,
+        description="Primitive ids to actively animate being constructed at this step. Use for plotted points, straight-line/curve drawing, auxiliary segments/diagonals, and other construction actions that directly correspond to this corrected step.",
     )
     camera_position: list[float] = Field(
         default_factory=list,
@@ -730,6 +742,8 @@ def _sanitize_visual_explanation(result: VisualExplanationResult) -> VisualExpla
     for step in result.steps:
         step.highlight_ids = [item for item in step.highlight_ids if item in valid_ids]
         step.dim_ids = [item for item in step.dim_ids if item in valid_ids and item not in step.highlight_ids]
+        step.reveal_ids = [item for item in step.reveal_ids if item in valid_ids]
+        step.animate_ids = [item for item in step.animate_ids if item in valid_ids]
         if len(step.camera_position) not in {0, 3}:
             step.camera_position = []
         if len(step.camera_target) not in {0, 3}:
@@ -848,17 +862,26 @@ STEP-BY-STEP PEDAGOGY — STRICT ALIGNMENT
 - Set source_step_index to the corresponding corrected solution step number (1, 2, 3, ...).
 - Do not invent an extra calculation step, omit a corrected step, change the algebra, or use a different method in the visual explanation.
 - The visual for each step should reveal the geometry/graph objects that justify THAT SAME corrected step.
+- Do not show the finished construction from Step 1. Build it progressively.
+- Use reveal_ids for primitives that first become visible at that step. Once revealed, they remain visible in later steps.
+- Use animate_ids for primitives that should visibly be constructed at that step. Examples: plot a newly calculated point, draw a straight line through established points, trace a graph curve, draw an auxiliary diagonal, reveal the radius/height used in a formula, or construct the 2D section used in a 3D calculation.
+- For a graph question, when a corrected step finds an intercept/coordinate, reveal and animate that point at that step. When a corrected step establishes the straight-line equation or says to draw/plot the line, include a numeric polyline for that line and put that line id in animate_ids so the student sees the straight line being drawn.
+- For a gradient step, visually reveal the horizontal/vertical change or relevant pair of points before showing the gradient calculation where possible.
+- For geometry, animate the segment/diagonal/angle that the corrected step introduces rather than merely highlighting the completed figure.
+- simulation_note must state the concrete visual action for the current step in student-friendly language.
 - highlight_ids must name the visual primitives central to the corresponding corrected step.
 - dim_ids may de-emphasize irrelevant edges/faces so the relevant relationship becomes obvious.
-- For 3D, use camera_position/camera_target only when a viewpoint materially clarifies that corrected step.
+- For 3D, use camera_position/camera_target when a viewpoint materially clarifies that corrected step; use a different viewpoint across steps only when it helps reveal the required section/angle.
 - When the student's original reasoning chose the wrong angle/side/coordinate pairing, explain the contrast in prose, but keep the displayed mathematics equal to the canonical corrected step.
 - math entries must contain the SAME mathematics as the corresponding canonical corrected step, in MathIO-ready source form with no visible delimiters.
 - Explanations must be concise and student-friendly. Put any mathematical expressions in \( ... \) transport delimiters for MathIO rendering.
 
 3D-SPECIFIC TEACHING
 - For a 3D angle/length question, explicitly reveal the 2D triangle or cross-section inside the solid before applying trigonometry or Pythagoras.
+- Use reveal_ids so that diagonal/cross-section edges appear only when the matching corrected step needs them, and animate_ids so those edges visibly grow into place.
 - Use dim_ids to fade unrelated edges and highlight the exact edges forming that triangle.
 - If a space diagonal is needed, show how it is obtained from a face/base diagonal first when appropriate.
+- If camera_position/camera_target changes between steps, the app may animate the camera transition so the student sees how the relevant plane or angle is located in the solid.
 
 Return a useful visual only when it is mathematically justified by the question.
 """.strip()
