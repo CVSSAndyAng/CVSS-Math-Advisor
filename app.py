@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -75,41 +76,45 @@ MAX_FILE_BYTES = 12 * 1024 * 1024
 MAX_TOTAL_BYTES = 30 * 1024 * 1024
 
 
-def math_markdown(text: str) -> str:
-    """Convert model-safe LaTeX delimiters into Streamlit Markdown math delimiters.
+_MATHIO_RENDER_SEQ = 0
+_mathio_display_component = None
 
-    Gemini is prompted to return \\( ... \\) / \\[ ... \\] so raw dollar signs
-    never appear in stored model output. Streamlit Markdown renders the converted
-    delimiters with KaTeX in the browser.
-    """
+
+def _strip_math_transport_delimiters(text: str) -> str:
+    """Remove model transport delimiters before sending maths to the MathIO view."""
     if not text:
         return ""
-    return (
-        str(text)
-        .replace(r"\[", "$$")
-        .replace(r"\]", "$$")
-        .replace(r"\(", "$")
-        .replace(r"\)", "$")
-    )
-
-
-def render_math_text(text: str) -> None:
-    st.markdown(math_markdown(text))
-
-
-def _mathio_latex(text: str) -> str:
-    """Normalize model LaTeX for equation-view rendering without showing delimiters."""
-    if not text:
-        return r"\text{No reference answer available}"
     value = str(text).strip()
-    for token in (r"\(", r"\)", r"\[", r"\]", "$$", "$"):
-        value = value.replace(token, "")
+    pairs = ((r"\(", r"\)"), (r"\[", r"\]"), ("$$", "$$"), ("$", "$"))
+    for left, right in pairs:
+        if value.startswith(left) and value.endswith(right) and len(value) >= len(left) + len(right):
+            value = value[len(left): len(value) - len(right)]
+            break
     return value.strip()
 
 
+def _next_mathio_key(text: str) -> str:
+    global _MATHIO_RENDER_SEQ
+    _MATHIO_RENDER_SEQ += 1
+    digest = hashlib.sha1(str(text).encode("utf-8", errors="ignore")).hexdigest()[:10]
+    return f"mathio_view_{_MATHIO_RENDER_SEQ}_{digest}"
+
+
 def render_mathio(text: str) -> None:
-    """Render reference mathematics in MathIO/equation view."""
-    st.latex(_mathio_latex(text))
+    """Render mathematics with the read-only MathIO/MathLive view; never expose source notation."""
+    value = _strip_math_transport_delimiters(text)
+    if not value:
+        return
+    if _mathio_display_component is None:
+        st.info("Equation view is temporarily unavailable. Reload the page to restore the maths display.")
+        return
+    _mathio_display_component(
+        data={"math": value},
+        default={},
+        key=_next_mathio_key(value),
+        width="stretch",
+        height="content",
+    )
 
 
 _MATHIO_MIXED_PATTERN = re.compile(
@@ -117,22 +122,24 @@ _MATHIO_MIXED_PATTERN = re.compile(
 )
 
 
-def render_mathio_mixed(text: str) -> None:
-    """Render prose normally and every delimited maths fragment in equation view.
+def _contains_raw_math_source(text: str) -> bool:
+    """Detect source-style maths commands that should never be shown directly to students."""
+    return bool(re.search(r"\\(?:frac|sqrt|times|div|cdot|theta|alpha|beta|gamma|pi|sin|cos|tan|log|ln|leq|geq|neq|pm|text|overline|bar|angle|circ)\b|\^\{|_\{", text or ""))
 
-    Gemini prose fields use ``\\(...\\)`` / ``\\[...\\]`` around mathematics.
-    This renderer strips those transport delimiters and sends only the mathematical
-    fragment to ``st.latex`` so students never see raw LaTeX commands.
+
+def render_mathio_mixed(text: str) -> None:
+    r"""Render prose normally and all mathematical fragments through MathIO.
+
+    New Gemini responses delimit maths fragments with \(...\) or \[...\].
+    A defensive fallback prevents raw source commands from ever being shown.
     """
     if not text:
         return
     chunks = _MATHIO_MIXED_PATTERN.split(str(text))
     for chunk in chunks:
-        if not chunk:
+        if not chunk or not chunk.strip():
             continue
         stripped = chunk.strip()
-        if not stripped:
-            continue
         is_math = (
             (stripped.startswith(r"\(") and stripped.endswith(r"\)"))
             or (stripped.startswith(r"\[") and stripped.endswith(r"\]"))
@@ -140,9 +147,19 @@ def render_mathio_mixed(text: str) -> None:
             or (stripped.startswith("$") and stripped.endswith("$"))
         )
         if is_math:
-            st.latex(_mathio_latex(stripped))
+            render_mathio(stripped)
+        elif _contains_raw_math_source(stripped):
+            # Do not leak raw source notation. Treat a source-heavy fragment as maths.
+            # New analyses are prompted to delimit mixed prose correctly, so this is mainly
+            # a compatibility guard for older session content.
+            render_mathio(stripped)
         else:
             st.markdown(stripped)
+
+
+def render_math_text(text: str) -> None:
+    """Compatibility wrapper: all student-facing maths now goes through MathIO."""
+    render_mathio_mixed(text)
 
 
 MATHLIVE_VERSION = "0.110.0"  # Patched MathLive release used by the visual equation editor.
@@ -311,6 +328,77 @@ except Exception:
     _equation_editor_component = None
 
 
+_MATHIO_DISPLAY_HTML = """
+<div class="omt-mathio-display" aria-live="polite"></div>
+"""
+
+_MATHIO_DISPLAY_CSS = """
+.omt-mathio-display { width: 100%; overflow-x: auto; padding: .15rem 0 .25rem 0; }
+.omt-mathio-display math-field {
+  display: inline-block;
+  width: auto;
+  min-width: 0;
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  color: var(--st-text-color, #222);
+  padding: 0;
+  margin: 0;
+  font-size: 1.08rem;
+  pointer-events: none;
+  --caret-color: transparent;
+  --selection-background-color: transparent;
+}
+@media (pointer: coarse) { .omt-mathio-display math-field { font-size: 1.16rem; } }
+"""
+
+_MATHIO_DISPLAY_JS = f"""
+const MATHLIVE_URL = 'https://cdn.jsdelivr.net/npm/mathlive@{MATHLIVE_VERSION}/+esm';
+
+async function ensureMathLiveForDisplay() {{
+  if (!customElements.get('math-field')) {{
+    if (!globalThis.__omtMathLivePromise) {{
+      globalThis.__omtMathLivePromise = import(MATHLIVE_URL);
+    }}
+    await globalThis.__omtMathLivePromise;
+  }}
+}}
+
+export default async function(component) {{
+  const {{ parentElement, data }} = component;
+  const root = parentElement.querySelector('.omt-mathio-display');
+  root.replaceChildren();
+  try {{
+    await ensureMathLiveForDisplay();
+    const mf = document.createElement('math-field');
+    mf.value = String(data?.math || '');
+    mf.readOnly = true;
+    mf.setAttribute('read-only', '');
+    mf.setAttribute('virtual-keyboard-mode', 'off');
+    mf.setAttribute('aria-label', 'Rendered mathematics');
+    mf.tabIndex = -1;
+    root.appendChild(mf);
+  }} catch (err) {{
+    const msg = document.createElement('span');
+    msg.textContent = 'Equation view could not load. Reload the page to restore the maths display.';
+    msg.style.opacity = '.72';
+    root.appendChild(msg);
+  }}
+}}
+"""
+
+try:
+    _mathio_display_component = st.components.v2.component(
+        "omt_mathio_display",
+        html=_MATHIO_DISPLAY_HTML,
+        css=_MATHIO_DISPLAY_CSS,
+        js=_MATHIO_DISPLAY_JS,
+        isolate_styles=False,
+    )
+except Exception:
+    _mathio_display_component = None
+
+
 def equation_working_editor(label: str, *, key: str) -> tuple[list[str], list[str]]:
     """Render a visual multi-step MathLive editor and return LaTeX + ASCIIMath lines."""
     if _equation_editor_component is None:
@@ -318,7 +406,7 @@ def equation_working_editor(label: str, *, key: str) -> tuple[list[str], list[st
             label,
             key=f"{key}_fallback",
             height=150,
-            placeholder=r"Fallback: type one LaTeX step per line, e.g. m=\frac{4-1}{-2-7}",
+            placeholder="Fallback: type one mathematical step per line, e.g. m=(4-1)/(-2-7)",
         )
         lines = [line.strip() for line in fallback.splitlines() if line.strip()]
         return lines, lines
@@ -377,7 +465,7 @@ def working_input(
             working_lines.append(f"Student explanation: {explanation.strip()}")
         working_for_gemini = "\n".join(working_lines)
         offline_text = "\n".join(used_ascii)
-        st.caption("The editor stores LaTeX internally for accurate maths rendering; students do not need to type LaTeX commands.")
+        st.caption("The equation editor stores the mathematical structure automatically; students do not need to type equation code.")
         return working_for_gemini, mode, offline_text
 
     value = st.text_area(label, key=text_key, height=height, placeholder=plain_placeholder)
@@ -953,9 +1041,12 @@ def render_visual_explanation(plan: VisualExplanationResult) -> None:
             st.info("The interactive 3D renderer is unavailable in this browser session.")
 
     st.markdown(f"#### {step.title}")
-    render_math_text(step.explanation)
+    st.caption(f"Matches corrected solution step {getattr(step, 'source_step_index', idx + 1)}")
+    st.markdown("**Matching corrected step**")
     for formula in step.math:
         render_mathio(formula)
+    st.markdown("**Why this visual matches the step**")
+    render_mathio_mixed(step.explanation)
 
     if plan.mode == "geometry3d":
         st.caption("iPad: drag with one finger to rotate the solid and pinch with two fingers to zoom. The simulation is explanatory and follows the stated geometry; it is not assumed to be drawn to scale unless the question says so.")
@@ -1125,8 +1216,10 @@ def render_attempt(result: AttemptResult) -> None:
         st.markdown("#### Step-by-step check")
         icon = {"correct": "✅", "incorrect": "❌", "unparsed": "🔎", "checked": "•"}
         for item in result.step_feedback:
-            with st.expander(f"{icon.get(item.status, '•')} Line {item.line_number}: {item.line}"):
-                st.write(item.feedback)
+            with st.expander(f"{icon.get(item.status, '•')} Line {item.line_number}"):
+                st.markdown("**Student step**")
+                render_mathio(item.line)
+                render_mathio_mixed(item.feedback)
     if result.strengths:
         st.markdown("**What is working**")
         for item in result.strengths:
@@ -1172,9 +1265,10 @@ def render_ai_analysis(a: GeminiAnalysis) -> None:
                     presentation_explanation = getattr(step, "presentation_error_explanation", "")
                     if presentation_explanation:
                         render_math_text(presentation_explanation)
-                st.markdown(f"**What the step appears to be doing:** {step.logic_inferred}")
+                st.markdown("**What the step appears to be doing**")
+                render_mathio_mixed(step.logic_inferred)
                 st.write(f"**Issue type:** {step.issue_type}")
-                st.write(step.feedback)
+                render_mathio_mixed(step.feedback)
                 supporting_math = list(getattr(step, "supporting_math", []) or [])
                 for formula in supporting_math:
                     render_mathio(formula)
@@ -1220,7 +1314,8 @@ def render_practice_evaluation(e: PracticeEvaluation) -> None:
     if presentation_errors:
         st.markdown("**Presentation errors**")
         for item in presentation_errors:
-            st.warning(item)
+            st.warning("Presentation issue detected in the student's working.")
+            render_mathio_mixed(item)
     if e.gaps:
         st.markdown("**Gaps**")
         for item in e.gaps:
@@ -1469,9 +1564,10 @@ def render_question_feasibility(result: QuestionFeasibilityResult, question_file
             if list(getattr(issue, "visual_regions", []) or []):
                 visual_note = f" · see diagram callout {issue_number}"
             if issue.severity == "blocking":
-                st.error(f"{label}{visual_note} — {issue.description}")
+                st.error(f"{label}{visual_note}")
             else:
-                st.warning(f"{label}{visual_note} — {issue.description}")
+                st.warning(f"{label}{visual_note}")
+            render_mathio_mixed(issue.description)
             if issue.suggested_fix:
                 render_math_text(f"**Suggested clarification/fix:** {issue.suggested_fix}")
 

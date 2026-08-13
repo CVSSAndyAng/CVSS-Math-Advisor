@@ -218,8 +218,13 @@ class VisualScene3D(BaseModel):
 
 
 class VisualExplanationStep(BaseModel):
+    source_step_index: int = Field(
+        default=1,
+        ge=1,
+        description="1-based corrected-solution step that this visual step explains. Visual steps must follow the corrected path in the same order.",
+    )
     title: str
-    explanation: str = Field(description="Concise student-facing explanation for this visual step")
+    explanation: str = Field(description="Concise student-facing explanation for this visual step; mathematical expressions must use \\( ... \\) transport delimiters so the app renders them in MathIO")
     math: list[str] = Field(
         default_factory=list,
         description=r"MathIO-ready raw LaTeX equations for this step, with no dollar-sign or \( \) delimiters",
@@ -294,13 +299,13 @@ class ReasoningStep(BaseModel):
 
 class TargetedPracticeQuestion(BaseModel):
     kind: Literal["Near transfer", "Varied context", "Stretch"]
-    question: str
-    target_skill: str
-    why_this_tests_understanding: str
+    question: str = Field(description=r"Student-facing question prose. Wrap every mathematical expression in \( ... \) or \[ ... \] transport delimiters for MathIO rendering; never expose raw source commands in prose.")
+    target_skill: str = Field(description=r"Plain-language skill description. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
+    why_this_tests_understanding: str = Field(description=r"Plain-language explanation. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
     required_parts: list[str] = Field(
         description="Every part that must be completed for mastery, e.g. ['(a)', '(b)', '(c)']. Use ['whole question'] for a single-part question."
     )
-    hints: list[str] = Field(description="Three progressive hints, from light to stronger")
+    hints: list[str] = Field(description=r"Three progressive hints, from light to stronger. Keep prose plain and wrap every mathematical expression in \( ... \) or \[ ... \] transport delimiters for MathIO rendering.")
     answer: str = Field(
         description="Complete reference answer covering every required part, as MathIO-ready LaTeX with no math delimiters. Use the LaTeX text command for labels, words, and units."
     )
@@ -310,16 +315,16 @@ class TargetedPracticeQuestion(BaseModel):
 
 
 class GeminiAnalysis(BaseModel):
-    interpreted_question: str
+    interpreted_question: str = Field(description=r"Conservative student-facing interpretation. Keep words as prose and wrap every mathematical expression in \( ... \) or \[ ... \] transport delimiters for MathIO rendering.")
     likely_syllabus_topic: str
-    student_method: str
-    strengths: list[str]
+    student_method: str = Field(description=r"Plain-language description of the visible method. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
+    strengths: list[str] = Field(description=r"Plain-language strengths. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
     steps: list[ReasoningStep]
     first_logic_break_step: int = Field(description="0 if no logic break is identified; otherwise the 1-based step number")
-    first_logic_break_explanation: str
-    misconception_or_gap: str
-    diagnostic_question: str
-    hint_ladder: list[str] = Field(description="Three progressively stronger hints")
+    first_logic_break_explanation: str = Field(description=r"Plain-language explanation. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
+    misconception_or_gap: str = Field(description=r"Plain-language diagnosis. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
+    diagnostic_question: str = Field(description=r"A student-facing diagnostic prompt. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
+    hint_ladder: list[str] = Field(description=r"Three progressively stronger hints. Wrap any mathematics in \( ... \) or \[ ... \] transport delimiters for MathIO rendering.")
     corrected_path: list[str] = Field(
         description="Corrected mathematical steps as MathIO-ready raw LaTeX with no delimiters; use \\text{...} only for short labels/units"
     )
@@ -338,11 +343,11 @@ class PracticeEvaluation(BaseModel):
     missing_or_incorrect_parts: list[str] = Field(description="Required parts that are missing, incomplete, or incorrect.")
     answer_score: int = Field(ge=0, le=100)
     reasoning_score: int = Field(ge=0, le=100)
-    summary: str
+    summary: str = Field(description=r"Plain-language evaluation summary. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
     first_logic_break_step: int = Field(description="0 if none; otherwise 1-based step number")
-    first_logic_break_explanation: str
-    strengths: list[str]
-    gaps: list[str]
+    first_logic_break_explanation: str = Field(description=r"Plain-language explanation. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
+    strengths: list[str] = Field(description=r"Plain-language strengths. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
+    gaps: list[str] = Field(description=r"Plain-language gaps. Wrap any mathematics in \( ... \) transport delimiters for MathIO rendering.")
     presentation_errors: list[str] = Field(
         default_factory=list,
         description=(
@@ -350,7 +355,7 @@ class PracticeEvaluation(BaseModel):
             "Do not include ordinary conceptual or arithmetic mistakes here."
         ),
     )
-    next_hint: str
+    next_hint: str = Field(description=r"Plain-language next hint. Wrap any mathematics in \( ... \) or \[ ... \] transport delimiters for MathIO rendering.")
     corrected_next_step: str = Field(
         description="The next corrected mathematical step as MathIO-ready raw LaTeX with no delimiters"
     )
@@ -732,6 +737,51 @@ def _sanitize_visual_explanation(result: VisualExplanationResult) -> VisualExpla
     return result
 
 
+def _align_visual_steps_to_corrected_path(
+    result: VisualExplanationResult,
+    analysis: GeminiAnalysis,
+) -> VisualExplanationResult:
+    """Force the interactive visual to mirror the tutor's corrected solution exactly."""
+    if result.mode == "none":
+        return result
+    canonical = [str(step).strip() for step in analysis.corrected_path if str(step).strip()]
+    if not canonical:
+        return result
+
+    by_index: dict[int, VisualExplanationStep] = {}
+    for step in result.steps:
+        idx = int(getattr(step, "source_step_index", 0) or 0)
+        if 1 <= idx <= len(canonical) and idx not in by_index:
+            by_index[idx] = step
+
+    original = list(result.steps)
+    aligned: list[VisualExplanationStep] = []
+    for index, canonical_math in enumerate(canonical, 1):
+        source = by_index.get(index)
+        if source is None and index - 1 < len(original):
+            source = original[index - 1].model_copy(deep=True)
+        elif source is not None:
+            source = source.model_copy(deep=True)
+
+        if source is None:
+            source = VisualExplanationStep(
+                source_step_index=index,
+                title=f"Corrected solution step {index}",
+                explanation="Follow this corrected step on the diagram or graph.",
+                math=[canonical_math],
+            )
+
+        source.source_step_index = index
+        # The maths shown beside the visual is always the exact canonical corrected step.
+        source.math = [canonical_math]
+        if not source.title.strip():
+            source.title = f"Corrected solution step {index}"
+        aligned.append(source)
+
+    result.steps = aligned
+    return result
+
+
 def generate_visual_explanation(
     *,
     track_label: str,
@@ -767,6 +817,9 @@ SELECTED QUESTION:
 VERIFIED TUTOR ANALYSIS CONTEXT:
 {context}
 
+CANONICAL CORRECTED SOLUTION STEPS — THE VISUAL MUST MATCH THESE EXACTLY:
+{chr(10).join(f"Step {i}: {line}" for i, line in enumerate(analysis.corrected_path, 1)) or "[No corrected path supplied]"}
+
 WHEN TO CREATE A VISUAL
 - geometry2d: plane geometry, similarity/congruence, circle geometry, bearings, transformations, trigonometry in 2D, mensuration diagrams.
 - graph2d: coordinate geometry, straight-line graphs, function graphs, loci on axes, gradients, intersections.
@@ -789,15 +842,18 @@ VISUAL DATA RULES
 - Keep scenes modest: usually <= 20 points/vertices and <= 35 other primitives.
 - In 3D include visible structural edges. Include faces only when they help orient the student.
 
-STEP-BY-STEP PEDAGOGY
-- Provide 3 to 7 steps.
-- Each step should reveal ONE idea: identify the target, isolate the relevant triangle/line/region, choose the relationship, substitute, calculate, verify.
-- highlight_ids must name the visual primitives central to that step.
-- dim_ids may de-emphasize irrelevant edges/faces so the relevant 2D cross-section becomes obvious.
-- For 3D, use camera_position/camera_target only when a viewpoint materially clarifies the step.
-- When the student's original reasoning chose the wrong angle/side/coordinate pairing, the first useful step may contrast the relevant objects, but do not shame the student.
-- math entries must be MathIO-ready raw LaTeX with no delimiters. Use textbook fractions, roots, indices and trig notation.
-- Explanations must be concise and student-friendly.
+STEP-BY-STEP PEDAGOGY — STRICT ALIGNMENT
+- The corrected solution steps above are canonical. The visual explanation MUST follow them in exactly the same order.
+- Return exactly one VisualExplanationStep for each corrected solution step when a corrected path is available.
+- Set source_step_index to the corresponding corrected solution step number (1, 2, 3, ...).
+- Do not invent an extra calculation step, omit a corrected step, change the algebra, or use a different method in the visual explanation.
+- The visual for each step should reveal the geometry/graph objects that justify THAT SAME corrected step.
+- highlight_ids must name the visual primitives central to the corresponding corrected step.
+- dim_ids may de-emphasize irrelevant edges/faces so the relevant relationship becomes obvious.
+- For 3D, use camera_position/camera_target only when a viewpoint materially clarifies that corrected step.
+- When the student's original reasoning chose the wrong angle/side/coordinate pairing, explain the contrast in prose, but keep the displayed mathematics equal to the canonical corrected step.
+- math entries must contain the SAME mathematics as the corresponding canonical corrected step, in MathIO-ready source form with no visible delimiters.
+- Explanations must be concise and student-friendly. Put any mathematical expressions in \( ... \) transport delimiters for MathIO rendering.
 
 3D-SPECIFIC TEACHING
 - For a 3D angle/length question, explicitly reveal the 2D triangle or cross-section inside the solid before applying trigonometry or Pythagoras.
@@ -833,7 +889,8 @@ Return a useful visual only when it is mathematically justified by the question.
     except Exception as exc:
         raise _translate_exception(exc) from exc
 
-    return _sanitize_visual_explanation(result)
+    result = _sanitize_visual_explanation(result)
+    return _align_visual_steps_to_corrected_path(result, analysis)
 
 def _validate_practice_question_completeness(question: TargetedPracticeQuestion) -> None:
     """Reject practice items whose reference material does not cover all required parts."""
