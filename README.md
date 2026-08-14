@@ -1,191 +1,288 @@
-# Singapore O/N-Level Math Reasoning Tutor — Gemini + Offline
+# SG Math Reasoning Tutor
 
-A Streamlit tutor built for Singapore secondary mathematics. It combines:
+A reasoning-first AI mathematics tutor for Singapore secondary
+mathematics, built with Streamlit and the Gemini API.
 
-1. **Gemini online analysis** for typed questions, images, handwritten workings and PDFs.
-2. **Deterministic offline checking** with Python/SymPy for supported algebra.
-3. **Offline syllabus-generated practice** across O-Level / N(A)-Level / N(T)-Level topic areas.
-4. **Targeted transfer questions** generated from the student's diagnosed gap: Near transfer, Varied context and Stretch.
-5. **Automatic fallback**: if Gemini is unavailable, its quota is reached, or no key is configured, the offline tabs continue to work.
+## Supported curriculum
 
-The tutor focuses on the reasoning visible in the student's work. It does not claim to read hidden thoughts or make judgments about intelligence, motivation, personality or learning/medical diagnoses.
+The tutor supports the 2027 Singapore-Cambridge Secondary Education
+Certificate (SEC) mathematics tracks:
 
-## Curriculum tracks
+-   G1 Mathematics (K110)
+-   G2 Mathematics (K210)
+-   G3 Mathematics (K310)
+-   G2 Additional Mathematics (K232)
+-   G3 Additional Mathematics (K341)
 
-The interface keeps the 2026 examination labels used by the offline curriculum map:
+The existing 2026 O-Level and N-Level Mathematics options are retained
+as transition tracks.
 
-- GCE O-Level Mathematics — syllabus 4052
-- GCE N(A)-Level Mathematics Syllabus A — syllabus 4045
-- GCE N(T)-Level Mathematics Syllabus T — syllabus 4046
+## What the tutor does
 
-This is an educational tool, not an official SEAB or MOE product.
+The tutor is designed to analyse how a student works through a
+mathematics problem rather than checking only the final answer.
 
-## Streamlit Community Cloud: fastest setup
+It can:
 
-### 1. Import the ZIP
+-   accept typed questions, images and PDFs;
+-   detect multiple questions in an uploaded worksheet or examination
+    page;
+-   check whether a question is complete, mathematically feasible and
+    internally consistent before analysing a solution;
+-   read student working from a separate upload;
+-   read student working that is already written on the same uploaded
+    question image or PDF;
+-   provide guided solving when no student solution is supplied;
+-   analyse handwritten work;
+-   identify the first material logic break;
+-   distinguish conceptual, procedural, arithmetic and presentation
+    errors;
+-   provide progressive hints and advice;
+-   generate adaptive Near Transfer, Varied Context and Stretch
+    practice;
+-   keep a student in the same practice category until mastery is
+    demonstrated;
+-   check every required subpart before allowing progression;
+-   independently verify calculable mathematics using Gemini code
+    execution where appropriate;
+-   support class/batch analysis of multiple student submissions and
+    identify common trends.
 
-Create a new Streamlit Community Cloud app and import this ZIP. The included `.replit` file starts Streamlit on port 3000.
+## Question upload modes
 
-### 2. Run without a key first
+After supplying a question, choose one of three modes:
 
-Press **Run**. The offline practice and offline algebra checker work with no API key.
+### Separate student solution
 
-### 3. Create a Gemini API key
+Use this when the question and the student's solution are in different
+files or when the student will type their working.
 
-Use Google AI Studio:
+### Student solution is already on the question upload
 
-https://aistudio.google.com/apikey
+Use this when the uploaded photo or PDF contains both the printed
+question and the student's handwritten or annotated solution.
 
-Google's Gemini API documentation:
+### No student solution --- guide me to solve it
 
-https://ai.google.dev/gemini-api/docs/api-key
+Use this when the student has not attempted the question.
 
-### 4. Store the key in Streamlit Community Cloud Secrets
+The tutor first checks question feasibility, then guides the student
+through:
 
-In Streamlit Community Cloud, open **Tools → Secrets** and add:
+1.  the goal and known information;
+2.  a diagnostic starting question;
+3.  progressive hints;
+4.  solution steps revealed one at a time;
+5.  a final verified answer that remains hidden until the end.
 
-```text
-Key:   GEMINI_API_KEY
-Value: paste_your_Gemini_key_here
+## Adaptive practice
+
+Practice progresses through:
+
+**Near Transfer → Varied Context → Stretch**
+
+The next category remains locked until the current category is secure.
+
+If a student makes a non-secure attempt, the tutor remains in the same
+category and generates another question focused on the same reasoning
+gap.
+
+For multi-part questions, all required parts must be completed correctly
+before the attempt can count as secure.
+
+## Mathematics input
+
+Students can use:
+
+-   the visual equation editor;
+-   handwritten working on an iPad using Apple Pencil, stylus or finger;
+-   typed text working;
+-   uploaded handwritten images or PDFs;
+-   editable tables;
+-   interactive graph and coordinate tools.
+
+The handwriting pad uses an explicit **Save handwriting** action so
+drawing does not repeatedly refresh the Streamlit app.
+
+## Interactive mathematics tools
+
+For graph, function and coordinate-geometry questions, the tutor can
+provide an interactive workspace with tools such as:
+
+-   point;
+-   line;
+-   segment;
+-   ray;
+-   vector;
+-   midpoint;
+-   parallel and perpendicular lines;
+-   circle;
+-   polygon;
+-   angle measurement;
+-   distance measurement;
+-   pan and zoom;
+-   undo, delete and clear.
+
+Students can also insert and fill editable tables and optionally display
+a function graph.
+
+## Visual explanations
+
+Visual step-by-step simulation is generated only when graphics genuinely
+help, such as:
+
+-   geometry;
+-   coordinate geometry;
+-   graphs and functions;
+-   trigonometry involving diagrams;
+-   bearings;
+-   transformations and constructions;
+-   3D solids;
+-   isometric and orthographic-view questions.
+
+Ordinary algebra, indices, standard form and other non-graphical
+questions do not need a visual simulation.
+
+For 3D questions, the tutor can reconstruct and explore solid forms
+where the uploaded information is sufficiently reliable.
+
+## Geometry safeguards
+
+For shaded-region, composite-area, perimeter and arc-length questions,
+the tutor must identify the relevant boundaries before formulating the
+mathematical expression.
+
+The intended reasoning sequence is:
+
+1.  identify the required region;
+2.  list the outer boundary lines/arcs/curves;
+3.  identify excluded or internal boundaries;
+4.  check that the boundary description is consistent;
+5.  formulate the area/perimeter expression;
+6.  independently verify the calculation.
+
+The tutor should not guess a familiar formula merely because a diagram
+resembles a common textbook example.
+
+## Question feasibility
+
+Before student-work analysis, the tutor checks for:
+
+-   missing information;
+-   contradictory givens;
+-   ambiguous wording;
+-   impossible values;
+-   cropped or missing diagrams;
+-   unclear tables or graphs;
+-   suspected typographical errors;
+-   inconsistent geometric relationships;
+-   whether every subpart is answerable.
+
+If a blocking issue is detected, marking is stopped until the question
+is clarified.
+
+For uploaded diagrams, the app can highlight relevant regions associated
+with feasibility warnings.
+
+## Accuracy architecture
+
+The tutor uses multiple layers rather than relying on a single model
+response:
+
+1.  question feasibility;
+2.  multimodal question/diagram interpretation;
+3.  independent mathematical verification;
+4.  student-working analysis;
+5.  adaptive follow-up practice.
+
+Gemini code execution is used as a verification aid for suitable
+computational work such as arithmetic, algebra, trigonometry, coordinate
+calculations, matrices and statistics.
+
+Code execution does not replace careful visual interpretation of
+diagrams.
+
+## Class trends / batch analysis
+
+The Class Trends workflow allows several student solutions to be
+uploaded for the same question.
+
+The question is verified once, then submissions are analysed separately.
+
+The summary can identify patterns such as:
+
+-   common misconceptions;
+-   common first logic-break steps;
+-   recurring presentation errors;
+-   areas of secure understanding;
+-   concepts that may need whole-class reteaching.
+
+Avoid including unnecessary student-identifying information in filenames
+or uploaded work.
+
+## Fast and Full analysis
+
+Where available:
+
+-   **Fast** prioritises reasoning analysis and mathematical
+    verification and delays optional visual-generation work.
+-   **Full** includes the richer visual explanation workflow.
+
+This helps reduce waiting time when visual reconstruction is not
+immediately needed.
+
+## Running on Streamlit Community Cloud
+
+The repository should contain at least:
+
+``` text
+app.py
+gemini_service.py
+offline_engine.py
+requirements.txt
+README.md
 ```
 
-Do not put the key in `app.py`, screenshots, chat messages or a public repository.
+Deploy `app.py` as the Streamlit main file.
 
-Restart the Streamlit Community Cloud app after adding the secret.
+### Gemini secret
 
-### 5. Use Gemini online analysis
+In Streamlit Community Cloud, add the Gemini API key under **App
+settings → Secrets**:
 
-Open **1 · Gemini analyse work**. A student can:
-
-- type the question;
-- upload a PNG/JPEG/WebP question image;
-- upload a PDF;
-- type their working;
-- upload handwritten working as an image/PDF; or
-- combine typed text and uploads.
-
-After analysis, the tutor displays:
-
-- interpreted question;
-- likely syllabus topic;
-- method evidenced by the work;
-- step-by-step reasoning check;
-- earliest material logic break;
-- misconception/gap;
-- diagnostic question;
-- progressive hints;
-- corrected path and final answer behind a reveal control; and
-- three targeted practice questions.
-
-Each targeted practice attempt can itself be checked by Gemini for both answer accuracy and reasoning quality.
-
-## Gemini model
-
-Default:
-
-```text
-gemini-3.5-flash-lite
+``` toml
+GEMINI_API_KEY = "your-api-key"
 ```
 
-The app also exposes `gemini-3.1-flash-lite` as a fallback model choice.
+Do not commit the API key to GitHub.
 
-Google currently describes Gemini 3.5 Flash-Lite as a low-latency, cost-effective multimodal model supporting text, image and PDF input. Free-tier eligibility and active quotas depend on the Google account/project and can change. Check Google AI Studio for the active limits on your project.
+## Dependencies
 
-Model docs:
+Dependencies are installed automatically by Streamlit from
+`requirements.txt`.
 
-https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
+The project uses the current `google-genai` Python SDK rather than the
+legacy `google.generativeai` package.
 
-Rate limits:
+## Privacy
 
-https://ai.google.dev/gemini-api/docs/rate-limits
+Student work may contain personal information.
 
-Pricing/free tier:
+Before uploading real student work:
 
-https://ai.google.dev/gemini-api/docs/pricing
+-   remove names where they are unnecessary;
+-   remove NRICs and other identifiers;
+-   avoid unnecessary school/class identifiers;
+-   follow applicable school, parent/guardian and organisational
+    policies;
+-   review the data-use terms for the Gemini API tier being used.
 
-## Privacy note for student work
+## Important limitation
 
-Online mode sends submitted content to Google's Gemini API. The app displays a consent acknowledgement before calling Gemini. Do not include unnecessary personal identifiers such as a student's full name, NRIC, school identifier, address or contact details.
+The tutor is an educational support tool, not an official marking
+authority.
 
-Google's free-tier data terms may differ from paid-tier data terms. Review the current Gemini API terms and your school's policies before using online mode with real student data.
-
-Offline practice and offline algebra checking do **not** call Gemini.
-
-## Hybrid verification design
-
-For a supported typed one-variable equation, the app first runs the deterministic SymPy checker. It passes the result to Gemini as supporting evidence while instructing Gemini to independently verify the mathematics. This helps catch obvious algebraic equivalence breaks while retaining Gemini's flexibility for explanations and alternative methods.
-
-If Gemini returns a quota/rate-limit/network/authentication error:
-
-- the offline tabs remain fully available;
-- for typed one-variable algebra that the deterministic engine understands, the app automatically displays the offline result as a fallback.
-
-## Run locally
-
-Python 3.10 or later:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-python -m pip install -r requirements.txt
-cp .env.example .env
-streamlit run app.py
-```
-
-If using Gemini locally, set `GEMINI_API_KEY` in your environment or `.env` loader of choice. The app itself reads environment variables and Streamlit Community Cloud Secrets directly.
-
-## Project structure
-
-```text
-singapore_math_gemini_hybrid/
-├── app.py
-├── ai_tutor/
-│   ├── offline_engine.py
-│   └── gemini_service.py
-├── tests/
-│   ├── test_offline_engine.py
-│   └── test_gemini_service.py
-├── .replit
-├── .streamlit/config.toml
-├── requirements.txt
-├── README.md
-├── REPLIT_START_HERE.md
-├── ARCHITECTURE.md
-└── VALIDATION.md
-```
-
-## Important limitations
-
-- AI analysis can be wrong, especially with poor handwriting, ambiguous diagrams or incomplete working.
-- The online model is not a substitute for an official marking scheme or teacher in high-stakes decisions.
-- Offline free-form checking is intentionally narrower than Gemini. Its strongest free-form capability is typed one-variable equation equivalence checking.
-- Offline generated practice has broader topic coverage because the engine knows the exact mathematical structure of the questions it generates.
-- Generated questions are original templates, not past-year SEAB questions.
-
-
-## GitHub browser-friendly flat layout
-
-This deployment copy intentionally keeps all runtime Python files at the repository root so it can be uploaded through GitHub's **Choose your files** dialog without uploading folders.
-
-Required files:
-- `app.py`
-- `gemini_service.py`
-- `offline_engine.py`
-- `requirements.txt`
-
-Optional documentation:
-- `README.md`
-
-For Streamlit Community Cloud, set `GEMINI_API_KEY` in **App settings → Secrets**.
-
-## Adaptive mastery-gated practice
-
-Gemini-targeted practice now runs in this order:
-
-1. Near transfer
-2. Varied context
-3. Stretch
-
-The next category stays locked until the current category is secure. A secure attempt requires a correct answer, at least 80% answer score, at least 80% reasoning score, and Gemini mastery of `Secure` or `Strong`.
-
-If the student misses a question or the reasoning is not secure, the tutor remains in the same category and generates another question targeting the same diagnosed gap. After any miss within a category, the student must complete two consecutive secure attempts in that same category before advancing. This prevents a single lucky answer from immediately unlocking harder transfer tasks.
+AI interpretation of handwriting, diagrams and unusual solution methods
+can be imperfect. For high-stakes assessment decisions, verify feedback
+against the official syllabus, examination marking guidance or a
+qualified teacher.
