@@ -528,6 +528,30 @@ class MathVerificationResult(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
+
+class GuidedSolution(BaseModel):
+    interpreted_goal: str
+    known_information: list[str] = Field(default_factory=list)
+    concepts_to_use: list[str] = Field(default_factory=list)
+    first_question_for_student: str = Field(
+        description="A short diagnostic/scaffolding question to make the student think before seeing solution steps"
+    )
+    hint_ladder: list[str] = Field(
+        default_factory=list,
+        description="Exactly three progressively stronger hints, MathIO-ready mathematics with no dollar delimiters"
+    )
+    guided_steps: list[str] = Field(
+        default_factory=list,
+        description="Ordered solution steps. Each item should be concise and MathIO-ready where mathematics is used."
+    )
+    final_answer_mathio: str = Field(
+        default="",
+        description="Verified final answer as MathIO-ready raw LaTeX with no dollar delimiters"
+    )
+    common_pitfalls: list[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"]
+
+
 class GeminiTutorError(RuntimeError):
     def __init__(self, message: str, category: str = "service") -> None:
         super().__init__(message)
@@ -1296,6 +1320,109 @@ def _validate_practice_question_completeness(question: TargetedPracticeQuestion)
             f"{question.kind} reference material is incomplete for: {', '.join(missing_labels)}. Please regenerate the analysis.",
             category="format",
         )
+
+
+def generate_guided_solution(
+    *,
+    track_label: str,
+    question_text: str,
+    question_assets: list[UploadedAsset] | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+    verification: MathVerificationResult | None = None,
+) -> GuidedSolution:
+    """Generate scaffolded guidance when there is no student solution to mark.
+
+    The question is independently verified first. The returned object contains the
+    complete verified path, but the Streamlit UI reveals it progressively.
+    """
+    question_assets = question_assets or []
+    if not question_text.strip() and not question_assets:
+        raise GeminiTutorError("Provide the question as text or an upload.", category="input")
+
+    active_client = client or _make_client(api_key)
+    verification = verification or verify_question_math(
+        track_label=track_label,
+        question_text=question_text,
+        question_assets=question_assets,
+        api_key=api_key,
+        model=model,
+        client=active_client,
+    )
+    if verification.status == "needs_clarification":
+        details = "; ".join(verification.contradictions_or_uncertainties) or verification.verification_summary
+        raise GeminiTutorError(
+            f"The question needs clarification before guided solving: {details}",
+            category="input",
+        )
+
+    prompt = f"""
+You are a Singapore secondary mathematics tutor for {track_label}.
+There is NO student solution to mark. Guide the student to solve the verified question.
+
+PEDAGOGY
+- Do not reveal the final answer immediately.
+- Begin with one short question that makes the student identify the relevant concept or first step.
+- Provide exactly three progressive hints.
+- Then provide a concise, correct sequence of guided steps that the app can reveal one at a time.
+- Use syllabus-appropriate methods and accept more than one valid method where appropriate.
+- Keep prose concise and student-friendly.
+
+ACCURACY
+- Use the independent verification evidence below as a check, and independently verify calculations.
+- Use the Python code-execution tool for arithmetic/algebra/trigonometric/numerical checks when useful.
+- Never guess missing information from a diagram.
+- For shaded/composite-region geometry, explicitly identify every relevant outer boundary and excluded/internal boundary before formulating an area expression.
+- If an attachment is unclear, state the uncertainty rather than inventing a value or label.
+
+MATH DISPLAY
+- Mathematics must be MathIO-ready raw LaTeX with NO $ delimiters.
+- Do not output Markdown math delimiters.
+- Ordinary explanations may be plain text.
+
+QUESTION:
+{question_text.strip() or '[Question supplied by attachment]'}
+
+INDEPENDENT VERIFICATION:
+{verification.model_dump_json(indent=2)}
+
+Return structured JSON only.
+""".strip()
+
+    inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for i, asset in enumerate(question_assets, 1):
+        inputs.append({"type": "text", "text": f"Question source {i}: {asset.name}"})
+        inputs.append(_encode_asset(asset))
+
+    try:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=inputs,
+            tools=_code_execution_tool(),
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": GuidedSolution.model_json_schema(),
+            },
+        )
+        result = GuidedSolution.model_validate_json(interaction.output_text)
+    except ValidationError as exc:
+        raise GeminiTutorError(
+            "Gemini returned guided-solution data in an unexpected format. Please try again.",
+            category="format",
+        ) from exc
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
+
+    if len(result.hint_ladder) != 3:
+        raise GeminiTutorError(
+            "Gemini did not return exactly three guided hints. Please try again.",
+            category="format",
+        )
+    return result
+
 
 def analyze_submission(
     *,

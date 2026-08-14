@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import base64
 import hashlib
+import inspect
 import math
 import json
 import os
@@ -20,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 from gemini_service import (
     DEFAULT_MODEL,
     GeminiAnalysis,
+    GuidedSolution,
     GeminiTutorError,
     MathVerificationResult,
     PracticeEvaluation,
@@ -33,6 +35,7 @@ from gemini_service import (
     detect_questions_in_assets,
     evaluate_practice_attempt,
     generate_followup_practice_question,
+    generate_guided_solution,
     generate_visual_explanation,
     get_api_key,
     required_parts_for_question,
@@ -2637,6 +2640,81 @@ def render_attempt(result: AttemptResult) -> None:
     render_mathio_mixed(result.next_hint)
 
 
+
+def call_analyze_submission_compat(**kwargs):
+    """Avoid transient deploy mismatches between app.py and gemini_service.py.
+
+    Streamlit Cloud can briefly serve a new app.py while a dependency module is still
+    being reloaded. Only pass keyword arguments supported by the currently imported
+    analyze_submission() signature.
+    """
+    try:
+        supported = inspect.signature(analyze_submission).parameters
+        safe_kwargs = {key: value for key, value in kwargs.items() if key in supported}
+        return analyze_submission(**safe_kwargs)
+    except (TypeError, ValueError):
+        # Fallback for unusual wrapped callables: retry once without the newest optional argument.
+        kwargs.pop("verification", None)
+        return analyze_submission(**kwargs)
+
+
+def render_guided_solution(g: GuidedSolution) -> None:
+    st.markdown('<div class="omt-section-kicker">Guided solving</div>', unsafe_allow_html=True)
+    st.markdown('<div class="omt-section-title">Work through the question</div>', unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown("#### 🎯 Goal")
+        render_mathio_mixed(g.interpreted_goal)
+        if g.known_information:
+            st.markdown("**What is given**")
+            for item in g.known_information:
+                render_mathio_mixed(f"• {item}")
+        if g.concepts_to_use:
+            st.markdown("**Useful concepts**")
+            for item in g.concepts_to_use:
+                render_mathio_mixed(f"• {item}")
+
+    with st.container(border=True):
+        st.markdown("#### 🤔 Start here")
+        render_mathio_mixed(g.first_question_for_student)
+
+        hint_count = int(st.session_state.get("guided_hint_count", 0))
+        if hint_count < len(g.hint_ladder):
+            if st.button("Show next hint", key="guided_show_hint", use_container_width=True):
+                st.session_state.guided_hint_count = hint_count + 1
+                st.rerun()
+        for i, hint in enumerate(g.hint_ladder[: int(st.session_state.get("guided_hint_count", 0))], 1):
+            st.markdown(f"**Hint {i}**")
+            render_mathio_mixed(hint)
+
+    reveal = int(st.session_state.get("guided_reveal_step", 0))
+    if g.guided_steps:
+        st.markdown("### Step-by-step guidance")
+        for i, step in enumerate(g.guided_steps, 1):
+            if i <= reveal:
+                with st.container(border=True):
+                    st.markdown(f"**Step {i}**")
+                    render_mathio_mixed(step)
+
+        if reveal < len(g.guided_steps):
+            if st.button(
+                "Reveal next solution step",
+                key="guided_reveal_next",
+                type="primary" if reveal == 0 else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.guided_reveal_step = reveal + 1
+                st.rerun()
+
+    if reveal >= len(g.guided_steps) and g.guided_steps:
+        with st.expander("Check the verified final answer", expanded=False):
+            render_mathio(g.final_answer_mathio)
+            if g.common_pitfalls:
+                st.markdown("**Common mistakes to avoid**")
+                for item in g.common_pitfalls:
+                    render_mathio_mixed(f"• {item}")
+
+
 def render_ai_analysis(a: GeminiAnalysis) -> None:
     st.markdown('<div class="omt-section-kicker">Diagnosis</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">What the student understands — and where the reasoning breaks</div>', unsafe_allow_html=True)
@@ -3129,6 +3207,12 @@ ai_tab, batch_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
     ]
 )
 
+# Guided-solving session defaults
+st.session_state.setdefault("ai_guided_solution", None)
+st.session_state.setdefault("ai_guided_error", "")
+st.session_state.setdefault("guided_hint_count", 0)
+st.session_state.setdefault("guided_reveal_step", 0)
+
 # ---------- Gemini online analysis ----------
 with ai_tab:
     st.markdown('<div class="omt-section-kicker">Step 1 · Submit</div>', unsafe_allow_html=True)
@@ -3156,28 +3240,53 @@ with ai_tab:
                 key="ai_question_files",
                 help="Photos, screenshots and PDFs are supported.",
             )
-            working_in_question_upload = st.checkbox(
-                "Student's working is already visible in the question upload",
-                key="ai_working_embedded_in_question",
-                help="Use this when the photo/PDF contains both the printed question and the student's handwritten or typed solution.",
+            submission_mode = st.radio(
+                "How is this question being used?",
+                [
+                    "Separate student solution",
+                    "Student solution is already on the question upload",
+                    "No student solution — guide me to solve it",
+                ],
+                key="ai_submission_mode",
+                help=(
+                    "Choose whether you want the tutor to mark a separate solution, read working already written "
+                    "on the uploaded question, or teach the question from scratch."
+                ),
             )
+            working_in_question_upload = submission_mode == "Student solution is already on the question upload"
+            guided_mode = submission_mode == "No student solution — guide me to solve it"
 
     with input_right:
         with st.container(border=True):
-            st.markdown("#### ✍️ Student working")
-            w_text, w_input_mode, w_offline_text = working_input(
-                "Student working",
-                text_key="ai_working_text",
-                format_key="ai_working_format",
-                height=160,
-                plain_placeholder="Type the steps, use the equation editor, or leave blank when the working is uploaded.",
-            )
-            w_files = st.file_uploader(
-                "Upload student working image/PDF",
-                type=["png", "jpg", "jpeg", "webp", "pdf"],
-                accept_multiple_files=True,
-                key="ai_working_files",
-            )
+            if guided_mode:
+                st.markdown("#### 🧭 Guided solving")
+                st.info(
+                    "No student solution is required. After the question passes the feasibility check, "
+                    "the tutor will guide the student with a diagnostic question, progressive hints, "
+                    "and solution steps revealed one at a time."
+                )
+                w_text, w_input_mode, w_offline_text = "", "No student working", ""
+                w_files = []
+            else:
+                st.markdown("#### ✍️ Student working")
+                if working_in_question_upload:
+                    st.caption(
+                        "The tutor will read the handwriting/annotations from the question upload. "
+                        "You may add extra working below if needed."
+                    )
+                w_text, w_input_mode, w_offline_text = working_input(
+                    "Student working",
+                    text_key="ai_working_text",
+                    format_key="ai_working_format",
+                    height=160,
+                    plain_placeholder="Type the steps, use the equation editor, or leave blank when the working is uploaded.",
+                )
+                w_files = st.file_uploader(
+                    "Upload student working image/PDF",
+                    type=["png", "jpg", "jpeg", "webp", "pdf"],
+                    accept_multiple_files=True,
+                    key="ai_working_files",
+                )
 
     # Clear stale detection results when the uploaded source changes.
     current_signature = question_file_signature(q_files)
@@ -3195,6 +3304,10 @@ with ai_tab:
         st.session_state.ai_visual_step = 0
         st.session_state.ai_cached_verification = None
         st.session_state.ai_cached_verification_signature = ""
+        st.session_state.ai_guided_solution = None
+        st.session_state.ai_guided_error = ""
+        st.session_state.guided_hint_count = 0
+        st.session_state.guided_reveal_step = 0
         clear_ai_practice_state()
         st.session_state.pop("ai_detected_question_selector", None)
 
@@ -3315,8 +3428,13 @@ with ai_tab:
     if not feasibility_ready:
         st.info("Student-working analysis remains locked until the current question passes the feasibility check.")
 
+    primary_action_label = (
+        "Start guided solution"
+        if guided_mode
+        else "Analyse student working with Gemini"
+    )
     if st.button(
-        "Analyse student working with Gemini",
+        primary_action_label,
         type="primary",
         use_container_width=True,
         disabled=not feasibility_ready,
@@ -3327,28 +3445,20 @@ with ai_tab:
         st.session_state.ai_visual_explanation = None
         st.session_state.ai_visual_error = ""
         st.session_state.ai_visual_step = 0
+        st.session_state.ai_guided_solution = None
+        st.session_state.ai_guided_error = ""
+        st.session_state.guided_hint_count = 0
+        st.session_state.guided_reveal_step = 0
         clear_ai_practice_state()
         if not consent:
-            st.error("Confirm the Gemini data-sharing acknowledgement before sending the submission.")
+            st.error("Confirm the Gemini data-sharing acknowledgement before sending the question.")
         elif not feasibility_ready:
-            st.error("Run the question feasibility check and resolve any blocking question issue before analysing the student's work.")
+            st.error("Run the question feasibility check and resolve any blocking question issue first.")
         else:
-            # The visual equation editor also returns ASCIIMath for the deterministic algebra fallback.
-            evidence, offline_result = offline_evidence_for(question_for_analysis, w_offline_text)
-            working_for_gemini = (
-                f"[Student working input method: {w_input_mode}]\n{w_text}" if w_text.strip() else w_text
-            )
-            if working_in_question_upload:
-                embedded_note = "[Student working is visible in the same uploaded question image/PDF. Inspect the handwritten/annotated working in that upload as the student's solution.]"
-                working_for_gemini = (working_for_gemini + "\n" + embedded_note).strip()
             try:
                 assets_q = uploaded_assets(q_files)
-                assets_w = uploaded_assets(w_files)
-                if working_in_question_upload:
-                    assets_w = [*assets_w, *assets_q]
 
-                # Cache the expensive independent verification for the current question so
-                # retries/new student working on the same question are faster.
+                # Cache the independent verification once per question.
                 verification = st.session_state.get("ai_cached_verification")
                 if st.session_state.get("ai_cached_verification_signature") != current_feasibility_signature:
                     verification = None
@@ -3364,8 +3474,34 @@ with ai_tab:
                     st.session_state.ai_cached_verification = verification
                     st.session_state.ai_cached_verification_signature = current_feasibility_signature
 
+                if guided_mode:
+                    with st.spinner("Preparing guided steps without revealing the answer immediately..."):
+                        guided = generate_guided_solution(
+                            track_label=track_label,
+                            question_text=question_for_analysis,
+                            question_assets=assets_q,
+                            api_key=explicit_key,
+                            model=model,
+                            verification=verification,
+                        )
+                    st.session_state.ai_guided_solution = guided
+                    st.rerun()
+
+                # Student-solution analysis path.
+                evidence, offline_result = offline_evidence_for(question_for_analysis, w_offline_text)
+                working_for_gemini = (
+                    f"[Student working input method: {w_input_mode}]\n{w_text}" if w_text.strip() else w_text
+                )
+                if working_in_question_upload:
+                    embedded_note = "[Student working is visible in the same uploaded question image/PDF. Inspect the handwritten/annotated working in that upload as the student's solution.]"
+                    working_for_gemini = (working_for_gemini + "\n" + embedded_note).strip()
+
+                assets_w = uploaded_assets(w_files)
+                if working_in_question_upload:
+                    assets_w = [*assets_w, *assets_q]
+
                 with st.spinner("Gemini is checking the student's reasoning..."):
-                    analysis = analyze_submission(
+                    analysis = call_analyze_submission_compat(
                         track_label=track_label,
                         question_text=question_for_analysis,
                         working_text=working_for_gemini,
@@ -3399,6 +3535,13 @@ with ai_tab:
                 if offline_result is not None:
                     st.session_state.ai_fallback_result = offline_result
                 st.rerun()
+
+    guided_result = st.session_state.get("ai_guided_solution")
+    if guided_result is not None:
+        render_guided_solution(guided_result)
+
+    if st.session_state.get("ai_guided_error"):
+        st.error(st.session_state.ai_guided_error)
 
     if st.session_state.ai_error:
         st.error(st.session_state.ai_error)
@@ -3715,7 +3858,7 @@ with batch_tab:
                         student_question_assets = batch_assets_q
                         if batch_solution_contains_question:
                             student_question_assets = solution_assets if not batch_q_files else batch_assets_q
-                        analysis = analyze_submission(
+                        analysis = call_analyze_submission_compat(
                             track_label=track_label,
                             question_text=batch_q_text,
                             working_text="[The student's solution is supplied in the uploaded file. Read all visible working and annotations conservatively.]",
