@@ -2775,22 +2775,26 @@ def clean_guidance_text(value: str) -> str:
     """Remove model-generated bullet LaTeX and normalize spacing for prose."""
     text = str(value or "").strip()
     text = re.sub(r"\\textbullet\s*", "", text)
-    text = re.sub(r"^\s*[•●▪◦*-]\s*", "", text)
+    text = re.sub(r"\\bullet\s*", "", text)
+    text = re.sub(r"^\s*[•●▪◦*-]+\s*", "", text)
     # Common model failure: prose wrapped in LaTeX text commands.
     text = re.sub(r"\\text\{([^{}]*)\}", r"\1", text)
     text = re.sub(r"\\mathrm\{([^{}]*)\}", r"\1", text)
-    return re.sub(r"\s{2,}", " ", text).strip()
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    # Suppress items that contain no meaningful content after cleaning.
+    if not re.search(r"[A-Za-z0-9]", text):
+        return ""
+    return text
 
 
 def guidance_item(value: str) -> None:
-    """Render a readable bullet while preserving genuine mathematical fragments."""
+    """Render one compact guidance item; do not create an empty bullet row."""
     text = clean_guidance_text(value)
     if not text:
         return
-    st.markdown('<div class="omt-guidance-item">', unsafe_allow_html=True)
-    st.markdown("• ", unsafe_allow_html=False)
-    render_mathio_mixed(text)
-    st.markdown("</div>", unsafe_allow_html=True)
+    # Keep the bullet and its content in the same rendered flow so Streamlit
+    # does not create a detached bullet on a separate line.
+    render_mathio_mixed(f"• {text}")
 
 
 def render_guidance_step(step_number: int, value: str) -> None:
@@ -2835,14 +2839,18 @@ def render_guided_solution(g: GuidedSolution) -> None:
         st.markdown("### 🎯 Goal")
         render_mathio_mixed(clean_guidance_text(g.interpreted_goal))
 
-        if g.known_information:
+        known_items = [clean_guidance_text(item) for item in g.known_information]
+        known_items = [item for item in known_items if item]
+        if known_items:
             st.markdown("#### What is given")
-            for item in g.known_information:
+            for item in known_items:
                 guidance_item(item)
 
-        if g.concepts_to_use:
+        concept_items = [clean_guidance_text(item) for item in g.concepts_to_use]
+        concept_items = [item for item in concept_items if item]
+        if concept_items:
             with st.expander("Useful concepts", expanded=False):
-                for item in g.concepts_to_use:
+                for item in concept_items:
                     guidance_item(item)
 
     support_mode = st.radio(

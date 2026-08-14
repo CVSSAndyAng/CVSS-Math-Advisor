@@ -635,6 +635,18 @@ class GuidedSolution(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
+class GuidedStepsRecovery(BaseModel):
+    guided_steps: list[str] = Field(
+        min_length=1,
+        description="A concise, ordered, verified worked solution. Each step should be a readable sentence with MathIO-ready maths only where needed.",
+    )
+    final_answer_mathio: str = Field(
+        default="",
+        description="Verified final answer as MathIO-ready raw LaTeX with no dollar delimiters",
+    )
+
+
+
 class GeminiTutorError(RuntimeError):
     def __init__(self, message: str, category: str = "service") -> None:
         super().__init__(message)
@@ -1464,6 +1476,60 @@ def _validate_practice_question_completeness(question: TargetedPracticeQuestion)
         )
 
 
+
+def _recover_guided_steps(
+    *,
+    active_client,
+    track_label: str,
+    question_text: str,
+    question_assets: list[UploadedAsset],
+    verification: MathVerificationResult,
+    model: str | None,
+) -> GuidedStepsRecovery:
+    """Recover worked steps if the first guided response omitted them."""
+    prompt = f"""
+You are repairing an incomplete guided mathematics solution for {track_label}.
+
+The question has already been independently verified.
+Return ONLY the missing worked-solution content.
+
+REQUIREMENTS
+- Produce between 2 and 8 concise ordered steps.
+- Each step must explain what to do and show the relevant mathematics.
+- Do not skip from the givens directly to the final answer.
+- For shaded/composite geometry, explicitly identify the relevant boundary/region structure before writing the area expression.
+- Use readable prose. Do NOT wrap whole sentences in LaTeX.
+- Use MathIO-ready raw LaTeX only for actual mathematical expressions; no $ delimiters.
+- Do not use \\textbullet or \\bullet.
+- final_answer_mathio must contain the verified final answer.
+
+QUESTION:
+{question_text.strip() or '[Question supplied by attachment]'}
+
+VERIFICATION:
+{verification.model_dump_json(indent=2)}
+
+Return structured JSON only.
+""".strip()
+
+    inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for i, asset in enumerate(question_assets, 1):
+        inputs.append({"type": "text", "text": f"Question source {i}: {asset.name}"})
+        inputs.append(_encode_asset(asset))
+
+    interaction = active_client.interactions.create(
+        model=get_model(model),
+        store=False,
+        input=inputs,
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": GuidedStepsRecovery.model_json_schema(),
+        },
+    )
+    return GuidedStepsRecovery.model_validate_json(interaction.output_text)
+
+
 def generate_guided_solution(
     *,
     track_label: str,
@@ -1564,6 +1630,45 @@ Return structured JSON only.
     # Be tolerant of model variation. The UI expects three progressive hints,
     # but a useful guided solution should not fail merely because Gemini returned
     # two or four hints.
+    # The model occasionally returns goal/hints but leaves guided_steps empty.
+    # Recover the missing worked solution instead of making the student regenerate manually.
+    if not [step for step in result.guided_steps if str(step).strip()]:
+        try:
+            recovered = _recover_guided_steps(
+                active_client=active_client,
+                track_label=track_label,
+                question_text=question_text,
+                question_assets=question_assets,
+                verification=verification,
+                model=model,
+            )
+            result.guided_steps = [str(step).strip() for step in recovered.guided_steps if str(step).strip()]
+            if recovered.final_answer_mathio.strip():
+                result.final_answer_mathio = recovered.final_answer_mathio.strip()
+        except Exception:
+            # Final deterministic fallback: provide a minimal verified path rather than
+            # a blank Full solution panel.
+            facts = [str(x).strip() for x in verification.verified_facts if str(x).strip()]
+            fallback_steps = []
+            if verification.problem_type == "shaded_area" and verification.geometry_boundaries:
+                boundary_text = "; ".join(
+                    f"{b.label}: {b.description}" for b in verification.geometry_boundaries
+                )
+                fallback_steps.append(
+                    "Identify the boundary of the shaded region before forming an area equation: "
+                    + boundary_text
+                )
+            fallback_steps.extend(facts[:5])
+            if not fallback_steps:
+                fallback_steps = [
+                    "List the known information and identify exactly what the question asks you to find.",
+                    "Choose the syllabus-appropriate mathematical relationship that connects the known information to the unknown.",
+                    "Substitute the given values carefully and simplify step by step.",
+                ]
+            result.guided_steps = fallback_steps
+            if not result.final_answer_mathio.strip():
+                result.final_answer_mathio = verification.verified_answer_mathio.strip()
+
     cleaned_hints = [str(h).strip() for h in result.hint_ladder if str(h).strip()]
     if len(cleaned_hints) >= 3:
         result.hint_ladder = cleaned_hints[:3]
