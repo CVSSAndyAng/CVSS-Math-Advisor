@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
@@ -525,6 +525,72 @@ class GeometryBoundaryItem(BaseModel):
 
 class MathVerificationResult(BaseModel):
     status: Literal["verified", "verified_with_caveats", "needs_clarification", "could_not_verify"]
+
+    @field_validator("geometry_boundaries", mode="before")
+    @classmethod
+    def normalize_geometry_boundaries(cls, value):
+        """Accept either structured boundary objects or concise strings.
+
+        Gemini occasionally returns a mathematically useful boundary trace as strings
+        even when the response schema asks for objects. Formatting differences should
+        not turn a valid geometry question into "needs clarification".
+        """
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+
+        normalized = []
+        for index, item in enumerate(value, start=1):
+            if isinstance(item, dict):
+                data = dict(item)
+                data.setdefault("order", index)
+                data.setdefault("role", "outer")
+                data.setdefault("kind", "other")
+                data.setdefault("label", f"Boundary {index}")
+                data.setdefault("description", str(data.get("label", f"Boundary {index}")))
+                normalized.append(data)
+                continue
+
+            if isinstance(item, str):
+                text = item.strip()
+                lowered = text.lower()
+
+                role = "outer"
+                if any(token in lowered for token in ("excluded", "hole", "cut-out", "cutout")):
+                    role = "excluded"
+                elif "internal" in lowered:
+                    role = "internal"
+
+                kind = "other"
+                if "arc" in lowered or "semicircle" in lowered or "circle" in lowered:
+                    kind = "arc"
+                elif "curve" in lowered:
+                    kind = "curve"
+                elif "ray" in lowered:
+                    kind = "ray"
+                elif any(token in lowered for token in ("segment", "side", "line", "edge")):
+                    kind = "segment"
+
+                # Prefer a short geometric label if one appears at the start.
+                label_match = re.search(
+                    r"(?i)(arc\s+[A-Z]{1,3}|[A-Z]{2,4}|semicircle(?:\s+on\s+[A-Z]{2})?)",
+                    text,
+                )
+                label = label_match.group(1) if label_match else f"Boundary {index}"
+                normalized.append(
+                    {
+                        "order": index,
+                        "role": role,
+                        "kind": kind,
+                        "label": label,
+                        "description": text,
+                    }
+                )
+                continue
+
+            normalized.append(item)
+        return normalized
     problem_type: Literal[
         "arithmetic", "algebra", "indices", "surds", "coordinate_geometry", "graph",
         "geometry", "shaded_area", "trigonometry", "mensuration", "statistics",
@@ -630,10 +696,13 @@ MANDATORY GEOMETRY BOUNDARY PROTOCOL
 QUESTION TEXT:
 {question_text.strip() or '[Question supplied only by attachment]'}
 
-OUTPUT RULES
-- Return structured JSON only.
-- verified_answer_mathio is raw MathIO-ready LaTeX with no $ delimiters.
-- Keep verification_summary short and factual.
+VERIFICATION EVIDENCE RULES
+- This first pass is mathematical verification evidence, NOT application JSON.
+- Do not discuss JSON, schemas, object types, required properties, parsing, or formatting compliance.
+- For geometry, describe the boundary trace plainly and mathematically.
+- Distinguish genuine mathematical uncertainty from output-format issues.
+- A formatting preference is NEVER a reason to mark the question as needing clarification.
+- Keep the verification evidence concise and factual.
 """.strip()
 
     inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
@@ -658,12 +727,16 @@ OUTPUT RULES
         # Pass 2: normalize the verified evidence into the strict application schema.
         # No tools are needed in this pass, which makes structured output reliable.
         normalise_prompt = f"""
-Convert the independent verification evidence below into the required JSON schema.
-Do not redo or alter the mathematics. Preserve any uncertainty.
-For shaded-area questions, geometry_boundaries must explicitly list every outer
-boundary and every excluded/internal boundary before any area equation is accepted.
-If that boundary evidence is incomplete, set status="needs_clarification" and
-boundary_check_complete=false.
+Convert the independent mathematical verification evidence below into the required JSON schema.
+Do not redo or alter the mathematics.
+
+IMPORTANT:
+- Treat schema/formatting issues as YOUR normalization job, never as mathematical uncertainty.
+- Never write a contradiction/uncertainty merely because the evidence used plain strings, bullets, or another data format.
+- Convert every geometry boundary into an object with order, role, kind, label, and description.
+- For shaded-area questions, geometry_boundaries must explicitly list every outer boundary and every excluded/internal boundary before any area equation is accepted.
+- Set status="needs_clarification" ONLY for a genuine mathematical/visual ambiguity or contradiction in the QUESTION itself.
+- If the mathematics is clear and the boundary trace is complete, use status="verified" or "verified_with_caveats" even if the first-pass evidence was unstructured text.
 
 QUESTION:
 {question_text.strip() or '[Question supplied only by attachment]'}
@@ -692,6 +765,22 @@ Return structured JSON only.
         )
         result = MathVerificationResult.model_validate_json(structured_interaction.output_text)
         result.code_execution_used = used_code
+
+        # A verifier must never block tutoring because of its own serialization format.
+        format_only_patterns = (
+            "schema", "structured object", "plain text string", "required properties",
+            "json", "format compliance", "parsing", "serialization",
+        )
+        real_uncertainties = [
+            item for item in result.contradictions_or_uncertainties
+            if not any(pattern in item.lower() for pattern in format_only_patterns)
+        ]
+        removed_format_only = len(real_uncertainties) != len(result.contradictions_or_uncertainties)
+        result.contradictions_or_uncertainties = real_uncertainties
+
+        if removed_format_only and result.status == "needs_clarification" and not real_uncertainties:
+            if result.problem_type != "shaded_area" or result.boundary_check_complete:
+                result.status = "verified_with_caveats"
     except ValidationError as exc:
         raise GeminiTutorError(
             "The independent verifier could not normalize its checked result. Please retry the verification.",
