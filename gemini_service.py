@@ -657,6 +657,47 @@ class GuidedStepsRecovery(BaseModel):
 
 
 
+class DiagramPrimitive(BaseModel):
+    id: str = Field(description="Short stable id such as arc_AB, semicircle_BC, segment_AB")
+    kind: Literal["segment", "arc", "circle", "semicircle", "curve", "point", "polygon_edge", "other"]
+    label: str = Field(description="Human-readable label")
+    endpoints: list[str] = Field(
+        default_factory=list,
+        description="Named endpoints where applicable, e.g. ['A','B']"
+    )
+    center: str = Field(default="", description="Named centre if explicitly shown or unambiguously implied")
+    visible_or_implied: Literal["visible", "implied_by_given"]
+    description: str
+
+
+class DiagramTopologyResult(BaseModel):
+    is_shaded_geometry: bool
+    complete: bool = Field(
+        description="True only if every boundary component needed to identify the shaded region has been accounted for."
+    )
+    primitives: list[DiagramPrimitive] = Field(default_factory=list)
+    shaded_boundary_ids: list[str] = Field(
+        default_factory=list,
+        description="Primitive ids that actually bound the shaded region."
+    )
+    included_region_ids: list[str] = Field(
+        default_factory=list,
+        description="Primitive/region ids whose areas are included in a natural decomposition."
+    )
+    excluded_region_ids: list[str] = Field(
+        default_factory=list,
+        description="Primitive/region ids whose areas are excluded/subtracted in a natural decomposition."
+    )
+    directly_given_relations: list[str] = Field(default_factory=list)
+    derived_relations: list[str] = Field(
+        default_factory=list,
+        description="Simple structural consequences such as AC = AB - BC; no area calculation."
+    )
+    unaccounted_or_ambiguous_features: list[str] = Field(default_factory=list)
+    topology_summary: str
+    confidence: Literal["high", "medium", "low"]
+
+
 class GeometryAuditResult(BaseModel):
     verdict: Literal["confirmed", "corrected", "uncertain"]
     boundary_interpretation: list[str] = Field(default_factory=list)
@@ -689,6 +730,69 @@ def _interaction_used_code_execution(interaction: object) -> bool:
     return False
 
 
+def _extract_geometry_topology(
+    *,
+    active_client,
+    track_label: str,
+    question_text: str,
+    question_assets: list[UploadedAsset],
+    model: str | None,
+) -> DiagramTopologyResult:
+    """Identify diagram topology before any shaded-area calculation.
+
+    This pass is deliberately calculation-free. Its only job is to account for the
+    visible/implied geometric objects and the exact boundary of the shaded region.
+    """
+    prompt = f"""
+You are the DIAGRAM TOPOLOGY reader for a Singapore mathematics tutor ({track_label}).
+
+Your job is NOT to solve the question and NOT to calculate an area.
+
+For the uploaded question/diagram:
+1. Inventory every geometric primitive relevant to the shaded region:
+   segments, arcs, full circles, semicircles, curves, points, and polygon edges.
+2. Give each primitive a stable id.
+3. Record its named endpoints and centre where known.
+4. Identify exactly which primitives form the boundary of the shaded region.
+5. Identify whole regions naturally INCLUDED and EXCLUDED if the diagram is a
+   composite-area problem.
+6. Record direct givens separately from simple structural consequences.
+7. Do not omit a visible/implied curve merely because another familiar formula seems easier.
+8. Do not calculate areas, integrate, or choose a final formula.
+9. Set complete=false if any visible curve/arc that may affect the shaded region has
+   not been accounted for.
+10. For diagrams with collinear diameter points (for example A-C-B), explicitly
+    identify all implied diameter subsegments and any semicircle drawn on each one.
+
+CRITICAL EXAMPLE OF THE RULE:
+If a diagram contains a large semicircle on AB, a semicircle on BC, AND a semicircle
+on AC, all three must appear in primitives before any later verifier is allowed to
+calculate. A two-curve reconstruction would be topologically incomplete.
+
+QUESTION:
+{question_text.strip() or '[Question supplied by attachment]'}
+
+Return structured JSON only. No solution.
+""".strip()
+
+    inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for i, asset in enumerate(question_assets, 1):
+        inputs.append({"type": "text", "text": f"Question source {i}: {asset.name}"})
+        inputs.append(_encode_asset(asset))
+
+    interaction = active_client.interactions.create(
+        model=get_model(model),
+        store=False,
+        input=inputs,
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": DiagramTopologyResult.model_json_schema(),
+        },
+    )
+    return DiagramTopologyResult.model_validate_json(interaction.output_text)
+
+
 def _audit_shaded_geometry(
     *,
     active_client,
@@ -696,6 +800,7 @@ def _audit_shaded_geometry(
     question_text: str,
     question_assets: list[UploadedAsset],
     proposed: MathVerificationResult,
+    topology: DiagramTopologyResult | None,
     model: str | None,
 ) -> GeometryAuditResult:
     """Second independent audit for shaded/composite geometry.
@@ -725,8 +830,22 @@ MANDATORY:
 QUESTION:
 {question_text.strip() or '[Question supplied by attachment]'}
 
+AUTHORITATIVE DIAGRAM TOPOLOGY:
+{topology.model_dump_json(indent=2) if topology is not None else '[No topology pre-pass available]'}
+
 PROPOSED VERIFICATION:
 {proposed.model_dump_json(indent=2)}
+
+AUDIT RULE:
+- The topology inventory is authoritative for what curves/segments exist.
+- Do not silently discard a primitive listed there.
+- If the proposed method uses fewer boundary components than the topology requires,
+  the proposed method is wrong and must be corrected.
+- If topology gives a natural exact decomposition into complete standard regions,
+  audit that decomposition first. Do NOT replace it with a different two-curve
+  integration model.
+- Use coordinate integration / dense numerical sampling only to cross-check the same
+  shaded set defined by the authoritative topology.
 """.strip()
 
     inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
@@ -805,6 +924,19 @@ MANDATORY GEOMETRY BOUNDARY PROTOCOL
 - For circle intersections/overlaps, place the centres in coordinates and use either numerical integration, polygon/arc reasoning, or dense numerical sampling to estimate the shaded area independently.
 - Compare the independent numerical estimate with the symbolic formula. If they disagree materially, reject the symbolic formula and redo the geometry.
 
+AUTHORITATIVE DIAGRAM TOPOLOGY (established before calculation):
+{topology.model_dump_json(indent=2) if topology is not None else '[No topology pre-pass available]'}
+
+TOPOLOGY RULE:
+- If topology is present, every later formula/method MUST account for all boundary primitives listed there.
+- Do not replace the topology with a simpler two-curve/one-shape reconstruction.
+- If topology.included_region_ids / excluded_region_ids identify complete standard regions
+  (e.g. large semicircle minus two smaller semicircles), use that exact whole-region
+  decomposition as the PRIMARY symbolic method.
+- Coordinate integration or numerical sampling may be used only as an INDEPENDENT
+  cross-check once the topological region decomposition has been respected.
+- If topology.complete=false for a shaded-area question, do not calculate; request clarification.
+
 QUESTION TEXT:
 {question_text.strip() or '[Question supplied only by attachment]'}
 
@@ -823,6 +955,26 @@ VERIFICATION EVIDENCE RULES
         inputs.append(_encode_asset(asset))
 
     active_client = client or _make_client(api_key)
+
+    # Geometry topology is established BEFORE calculation. This prevents a later
+    # numerical verifier from confirming the wrong reconstructed diagram.
+    topology: DiagramTopologyResult | None = None
+    topology_keywords = re.compile(
+        r"\b(shaded|semicircle|circle|arc|sector|composite|region|perimeter|area|diagram)\b",
+        re.IGNORECASE,
+    )
+    if question_assets and (not (question_text or "").strip() or topology_keywords.search(question_text or "")):
+        try:
+            topology = _extract_geometry_topology(
+                active_client=active_client,
+                track_label=track_label,
+                question_text=question_text,
+                question_assets=question_assets,
+                model=model,
+            )
+        except Exception:
+            topology = None
+
     try:
         # Pass 1: verification/reasoning with Python code execution available.
         # Do not simultaneously force structured output here; tool traces can make
@@ -849,6 +1001,9 @@ IMPORTANT:
 - For shaded-area questions, geometry_boundaries must explicitly list every outer boundary and every excluded/internal boundary before any area equation is accepted.
 - Set status="needs_clarification" ONLY for a genuine mathematical/visual ambiguity or contradiction in the QUESTION itself.
 - If the mathematics is clear and the boundary trace is complete, use status="verified" or "verified_with_caveats" even if the first-pass evidence was unstructured text.
+
+AUTHORITATIVE TOPOLOGY:
+{topology.model_dump_json(indent=2) if topology is not None else '[No topology pre-pass available]'}
 
 QUESTION:
 {question_text.strip() or '[Question supplied only by attachment]'}
@@ -901,9 +1056,45 @@ Return structured JSON only.
     except Exception as exc:
         raise _translate_exception(exc) from exc
 
-    if result.problem_type == "shaded_area" and not result.boundary_check_complete:
-        result.status = "needs_clarification"
-        return result
+    if result.problem_type == "shaded_area":
+        if topology is not None and not topology.complete:
+            result.status = "needs_clarification"
+            result.boundary_check_complete = False
+            result.contradictions_or_uncertainties.extend(
+                topology.unaccounted_or_ambiguous_features
+                or ["The diagram topology is incomplete, so an area calculation is not yet reliable."]
+            )
+            return result
+
+        if topology is not None and topology.complete:
+            # Replace any weaker first-pass boundary inventory with the topology-backed one.
+            topo_boundaries = []
+            primitive_by_id = {p.id: p for p in topology.primitives}
+            for order, pid in enumerate(topology.shaded_boundary_ids, start=1):
+                primitive = primitive_by_id.get(pid)
+                if primitive is None:
+                    continue
+                kind = primitive.kind
+                if kind in {"circle", "semicircle"}:
+                    kind = "arc"
+                if kind not in {"segment", "arc", "curve", "ray", "other"}:
+                    kind = "other"
+                topo_boundaries.append(
+                    GeometryBoundaryItem(
+                        order=order,
+                        role="outer",
+                        kind=kind,
+                        label=primitive.label,
+                        description=primitive.description,
+                    )
+                )
+            if topo_boundaries:
+                result.geometry_boundaries = topo_boundaries
+                result.boundary_check_complete = True
+
+        if not result.boundary_check_complete:
+            result.status = "needs_clarification"
+            return result
 
     if result.problem_type == "shaded_area" and result.status in {"verified", "verified_with_caveats"}:
         try:
@@ -913,6 +1104,7 @@ Return structured JSON only.
                 question_text=question_text,
                 question_assets=question_assets,
                 proposed=result,
+                topology=topology,
                 model=model,
             )
             if audit.verdict == "uncertain":
