@@ -643,22 +643,58 @@ OUTPUT RULES
 
     active_client = client or _make_client(api_key)
     try:
-        interaction = active_client.interactions.create(
+        # Pass 1: verification/reasoning with Python code execution available.
+        # Do not simultaneously force structured output here; tool traces can make
+        # the final text unsuitable for direct Pydantic JSON parsing.
+        verification_interaction = active_client.interactions.create(
             model=get_model(model),
             store=False,
             input=inputs,
             tools=_code_execution_tool(),
+        )
+        evidence_text = (verification_interaction.output_text or "").strip()
+        used_code = _interaction_used_code_execution(verification_interaction)
+
+        # Pass 2: normalize the verified evidence into the strict application schema.
+        # No tools are needed in this pass, which makes structured output reliable.
+        normalise_prompt = f"""
+Convert the independent verification evidence below into the required JSON schema.
+Do not redo or alter the mathematics. Preserve any uncertainty.
+For shaded-area questions, geometry_boundaries must explicitly list every outer
+boundary and every excluded/internal boundary before any area equation is accepted.
+If that boundary evidence is incomplete, set status="needs_clarification" and
+boundary_check_complete=false.
+
+QUESTION:
+{question_text.strip() or '[Question supplied only by attachment]'}
+
+VERIFICATION EVIDENCE:
+{evidence_text}
+
+Return structured JSON only.
+""".strip()
+        normalise_inputs: list[dict[str, str]] = [{"type": "text", "text": normalise_prompt}]
+        # Reattach source images/PDFs so boundary fields can be normalized without
+        # losing visual grounding if the evidence references diagram labels.
+        for i, asset in enumerate(question_assets, 1):
+            normalise_inputs.append({"type": "text", "text": f"Question source {i}: {asset.name}"})
+            normalise_inputs.append(_encode_asset(asset))
+
+        structured_interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=normalise_inputs,
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
                 "schema": MathVerificationResult.model_json_schema(),
             },
         )
-        result = MathVerificationResult.model_validate_json(interaction.output_text)
-        result.code_execution_used = _interaction_used_code_execution(interaction)
+        result = MathVerificationResult.model_validate_json(structured_interaction.output_text)
+        result.code_execution_used = used_code
     except ValidationError as exc:
         raise GeminiTutorError(
-            "The independent verifier returned an unexpected structure. Please try again.",
+            "The independent verifier could not normalize its checked result. Please retry the verification.",
             category="format",
         ) from exc
     except Exception as exc:
