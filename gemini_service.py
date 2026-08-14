@@ -710,6 +710,35 @@ class GeometryAuditResult(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
+
+class PaperMarkPoint(BaseModel):
+    code: str = Field(description="Suggested marking code such as M1, A1, B1, E1, or another concise school-style code.")
+    marks: int = Field(ge=0, le=10)
+    description: str
+    allow_follow_through: bool = False
+
+
+class PaperPartSolution(BaseModel):
+    label: str = Field(description="Part label such as (a), (b)(i), or Whole question")
+    question_text: str
+    marks_available: int = Field(ge=0, le=30)
+    mark_source: Literal["printed", "suggested", "unclear"]
+    worked_steps: list[GuidedStep] = Field(default_factory=list)
+    final_answer_mathio: str = ""
+    marking_points: list[PaperMarkPoint] = Field(default_factory=list)
+    common_errors: list[str] = Field(default_factory=list)
+
+
+class PaperQuestionSolution(BaseModel):
+    question_number: str
+    topic: str
+    page_numbers: list[int] = Field(default_factory=list)
+    parts: list[PaperPartSolution]
+    total_marks: int = Field(ge=0, le=100)
+    verification_note: str
+    confidence: Literal["high", "medium", "low"]
+
+
 class GeminiTutorError(RuntimeError):
     def __init__(self, message: str, category: str = "service") -> None:
         super().__init__(message)
@@ -1302,13 +1331,14 @@ def detect_questions_in_assets(
     *,
     track_label: str,
     question_assets: list[UploadedAsset],
+    paper_text: str = "",
     api_key: str | None = None,
     model: str | None = None,
     client=None,
 ) -> QuestionDetectionResult:
     """Detect and conservatively transcribe main questions and subparts in uploaded images/PDFs."""
-    if not question_assets:
-        raise GeminiTutorError("Upload at least one question image or PDF before detecting questions.", category="input")
+    if not question_assets and not paper_text.strip():
+        raise GeminiTutorError("Upload a PDF or Word exam paper before detecting questions.", category="input")
 
     prompt = f"""
 You are inspecting uploaded Singapore secondary mathematics question pages for {track_label}.
@@ -1331,6 +1361,9 @@ TRANSCRIPTION RULES
 - page_numbers are 1-based PDF page numbers where visible; for separate uploaded images, use their 1-based upload order.
 - topic_hint should be short, for example Algebra, Coordinate geometry, Trigonometry, Statistics, or Probability.
 - Add a note when a diagram/table is essential but cannot be fully represented in the transcription.
+
+EXTRACTED WORD/PAPER TEXT (when supplied):
+{paper_text[:120000] if paper_text.strip() else '[No separately extracted text]'}
 
 Return all confirmed main questions in visual/document order.
 """.strip()
@@ -1805,6 +1838,137 @@ def _validate_practice_question_completeness(question: TargetedPracticeQuestion)
             category="format",
         )
 
+
+
+
+def generate_paper_question_solution(
+    *,
+    track_label: str,
+    detected_question: DetectedQuestion,
+    question_assets: list[UploadedAsset] | None = None,
+    paper_text_context: str = "",
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+) -> PaperQuestionSolution:
+    """Generate a verified worked solution and suggested marking guide for one paper question."""
+    question_assets = question_assets or []
+    active_client = client or _make_client(api_key)
+
+    subpart_lines = "\n".join(
+        f"{part.label}: {part.question_text}" for part in detected_question.subparts
+    )
+    scoped_question_text = (
+        f"Question {detected_question.question_number}\n"
+        f"{detected_question.question_text}\n"
+        + (f"Subparts:\n{subpart_lines}\n" if subpart_lines else "")
+        + (
+            f"Pages: {', '.join(map(str, detected_question.page_numbers))}\n"
+            if detected_question.page_numbers else ""
+        )
+        + "IMPORTANT: Solve ONLY this detected question from the supplied paper. Ignore other questions."
+    )
+
+    verification = verify_question_math(
+        track_label=track_label,
+        question_text=scoped_question_text,
+        question_assets=question_assets,
+        api_key=api_key,
+        model=model,
+        client=active_client,
+    )
+    if verification.status in {"needs_clarification", "could_not_verify"}:
+        uncertainty = "; ".join(verification.contradictions_or_uncertainties)
+        raise GeminiTutorError(
+            f"Question {detected_question.question_number} could not be verified reliably"
+            + (f": {uncertainty}" if uncertainty else "."),
+            category="input",
+        )
+
+    prompt = f"""
+You are producing a FULL WORKED SOLUTION and a SUGGESTED MARKING GUIDE for one
+Singapore secondary mathematics exam-paper question.
+
+TRACK:
+{track_label}
+{syllabus_context_for_track(track_label)}
+
+QUESTION TO SOLVE:
+{scoped_question_text}
+
+INDEPENDENT VERIFICATION:
+{verification.model_dump_json(indent=2)}
+
+PAPER TEXT CONTEXT (only if extracted from Word):
+{paper_text_context[:30000] if paper_text_context.strip() else '[None]'}
+
+REQUIREMENTS
+1. Solve EVERY printed subpart of this question. Do not omit (i)/(ii)/(iii).
+2. Use syllabus-appropriate methods and prefer the simplest valid school method.
+3. Every worked step uses explanation for readable prose and equations for standalone MathIO-ready raw LaTeX.
+4. Keep raw LaTeX out of explanation. No dollar delimiters.
+5. final_answer_mathio must agree with the independently verified mathematics.
+6. For shaded/composite geometry, respect the verifier's topology and boundary inventory.
+7. If printed marks are clearly visible, use them and set mark_source="printed".
+8. If marks are not visible/reliable, propose reasonable marks and set mark_source="suggested".
+9. marking_points are AI-GENERATED SUGGESTIONS, not an official SEAB/MOE marking scheme.
+10. Use familiar school-style codes only where helpful: M1 method, A1 accuracy, B1 independent result/fact, E1 explanation.
+11. Allow follow-through only where mathematically reasonable.
+12. Do not invent examiner tolerances or official alternative-answer notes not supported by the paper.
+13. Keep marking points concise and teacher-readable.
+14. Include common_errors only when genuinely useful.
+
+Return structured JSON only.
+""".strip()
+
+    inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for i, asset in enumerate(question_assets, 1):
+        inputs.append({
+            "type": "text",
+            "text": f"Paper source {i}; focus on Question {detected_question.question_number}.",
+        })
+        inputs.append(_encode_asset(asset))
+
+    try:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=inputs,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": PaperQuestionSolution.model_json_schema(),
+            },
+        )
+        result = PaperQuestionSolution.model_validate_json(interaction.output_text)
+    except ValidationError as exc:
+        raise GeminiTutorError(
+            f"Question {detected_question.question_number} solution returned an unexpected structure.",
+            category="format",
+        ) from exc
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
+
+    if len(result.parts) == 1 and verification.verified_answer_mathio.strip():
+        result.parts[0].final_answer_mathio = verification.verified_answer_mathio.strip()
+
+    for part in result.parts:
+        part.worked_steps = [
+            step for step in part.worked_steps
+            if step.explanation.strip() or any(str(eq).strip() for eq in step.equations)
+        ]
+        part.marking_points = [
+            point for point in part.marking_points
+            if point.marks > 0 and point.description.strip()
+        ]
+        if part.marks_available <= 0 and part.marking_points:
+            part.marks_available = sum(p.marks for p in part.marking_points)
+            part.mark_source = "suggested"
+
+    total = sum(part.marks_available for part in result.parts)
+    if total > 0:
+        result.total_marks = total
+    return result
 
 
 def _recover_guided_steps(

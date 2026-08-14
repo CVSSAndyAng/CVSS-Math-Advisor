@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import zipfile
 from io import BytesIO
 from collections import Counter
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
+from docx import Document
+from pypdf import PdfReader, PdfWriter
 
 from gemini_service import (
     DEFAULT_MODEL,
@@ -24,6 +27,7 @@ from gemini_service import (
     GuidedSolution,
     GeminiTutorError,
     MathVerificationResult,
+    PaperQuestionSolution,
     PracticeEvaluation,
     QuestionDetectionResult,
     QuestionFeasibilityResult,
@@ -36,6 +40,7 @@ from gemini_service import (
     evaluate_practice_attempt,
     generate_followup_practice_question,
     generate_guided_solution,
+    generate_paper_question_solution,
     generate_visual_explanation,
     get_api_key,
     required_parts_for_question,
@@ -3190,6 +3195,274 @@ def render_practice_evaluation(e: PracticeEvaluation) -> None:
         render_mathio(e.corrected_next_step)
 
 
+
+FULL_PAPER_MAX_BYTES = 30 * 1024 * 1024
+
+
+def extract_docx_exam(file_obj: Any) -> tuple[str, list[UploadedAsset]]:
+    """Extract readable text, tables and embedded images from a .docx exam paper."""
+    data = file_obj.getvalue()
+    if len(data) > FULL_PAPER_MAX_BYTES:
+        raise GeminiTutorError("The Word paper is larger than the 30 MB full-paper limit.", category="input")
+
+    document = Document(BytesIO(data))
+    chunks: list[str] = []
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if text:
+            chunks.append(text)
+
+    for table_index, table in enumerate(document.tables, 1):
+        chunks.append(f"[Table {table_index}]")
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            chunks.append(" | ".join(cells))
+
+    assets: list[UploadedAsset] = []
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            media_names = [
+                name for name in archive.namelist()
+                if name.startswith("word/media/")
+            ]
+            for index, name in enumerate(media_names, 1):
+                blob = archive.read(name)
+                suffix = Path(name).suffix.lower()
+                mime = {
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".webp": "image/webp",
+                }.get(suffix)
+                if mime:
+                    assets.append(
+                        UploadedAsset(
+                            name=f"{Path(file_obj.name).stem}_image_{index}{suffix}",
+                            mime_type=mime,
+                            data=blob,
+                        )
+                    )
+    except zipfile.BadZipFile as exc:
+        raise GeminiTutorError("The Word file could not be read as a valid .docx file.", category="input") from exc
+
+    return "\n".join(chunks), assets
+
+
+def full_paper_input(file_obj: Any) -> tuple[str, list[UploadedAsset]]:
+    """Convert a PDF or DOCX paper into text/assets suitable for Gemini."""
+    if file_obj is None:
+        return "", []
+
+    data = file_obj.getvalue()
+    if len(data) > FULL_PAPER_MAX_BYTES:
+        raise GeminiTutorError("The exam paper is larger than the 30 MB full-paper limit.", category="input")
+
+    suffix = Path(file_obj.name).suffix.lower()
+    if suffix == ".pdf":
+        return "", [
+            UploadedAsset(
+                name=file_obj.name,
+                mime_type="application/pdf",
+                data=data,
+            )
+        ]
+    if suffix == ".docx":
+        return extract_docx_exam(file_obj)
+    if suffix == ".doc":
+        raise GeminiTutorError(
+            "Legacy .doc files are not reliably readable in Streamlit Cloud. Save the paper as .docx or PDF and upload it again.",
+            category="input",
+        )
+    raise GeminiTutorError("Upload a PDF or Word (.docx) exam paper.", category="input")
+
+
+def scope_pdf_asset_to_pages(asset: UploadedAsset, pages: list[int]) -> UploadedAsset:
+    """Create a smaller PDF containing only the pages for one detected question."""
+    if asset.mime_type != "application/pdf" or not pages:
+        return asset
+    try:
+        reader = PdfReader(BytesIO(asset.data))
+        writer = PdfWriter()
+        valid_pages = sorted({p for p in pages if 1 <= p <= len(reader.pages)})
+        if not valid_pages:
+            return asset
+        for page_number in valid_pages:
+            writer.add_page(reader.pages[page_number - 1])
+        output = BytesIO()
+        writer.write(output)
+        return UploadedAsset(
+            name=f"{Path(asset.name).stem}_pages_{'-'.join(map(str, valid_pages))}.pdf",
+            mime_type="application/pdf",
+            data=output.getvalue(),
+        )
+    except Exception:
+        return asset
+
+
+def scoped_assets_for_paper_question(
+    assets: list[UploadedAsset],
+    page_numbers: list[int],
+) -> list[UploadedAsset]:
+    if not page_numbers:
+        return assets
+    scoped: list[UploadedAsset] = []
+    for asset in assets:
+        if asset.mime_type == "application/pdf":
+            scoped.append(scope_pdf_asset_to_pages(asset, page_numbers))
+        else:
+            scoped.append(asset)
+    return scoped
+
+
+def paper_solution_markdown(
+    *,
+    track_label: str,
+    paper_title: str,
+    solutions: list[PaperQuestionSolution],
+) -> str:
+    lines = [
+        f"# {paper_title or 'Full Paper Worked Solutions'}",
+        "",
+        f"**Track:** {track_label}",
+        "",
+        "> Suggested marking guides are AI-generated and are not official SEAB/MOE marking schemes.",
+        "",
+    ]
+    for question in solutions:
+        lines.append(f"## Question {question.question_number} — {question.topic}")
+        lines.append("")
+        for part in question.parts:
+            lines.append(f"### {part.label} ({part.marks_available} marks; {part.mark_source})")
+            lines.append("")
+            lines.append(part.question_text)
+            lines.append("")
+            for idx, step in enumerate(part.worked_steps, 1):
+                if step.explanation.strip():
+                    lines.append(f"{idx}. {step.explanation.strip()}")
+                for equation in step.equations:
+                    if str(equation).strip():
+                        lines.append(f"   `{str(equation).strip()}`")
+            if part.final_answer_mathio.strip():
+                lines.extend(["", f"**Final answer:** `{part.final_answer_mathio.strip()}`", ""])
+            if part.marking_points:
+                lines.append("**Suggested marking guide**")
+                for point in part.marking_points:
+                    ft = " (follow-through allowed)" if point.allow_follow_through else ""
+                    lines.append(f"- {point.code} [{point.marks}]: {point.description}{ft}")
+                lines.append("")
+        lines.append(f"**Question total:** {question.total_marks} marks")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def build_paper_solution_docx(
+    *,
+    track_label: str,
+    paper_title: str,
+    solutions: list[PaperQuestionSolution],
+) -> bytes:
+    """Create a teacher-friendly Word export. Equations are kept as readable source text."""
+    document = Document()
+    document.add_heading(paper_title or "Full Paper Worked Solutions", level=0)
+    document.add_paragraph(f"Track: {track_label}")
+    p = document.add_paragraph()
+    run = p.add_run("Important: ")
+    run.bold = True
+    p.add_run("The marking guides in this document are AI-generated suggestions, not official SEAB/MOE marking schemes.")
+
+    for question in solutions:
+        document.add_heading(f"Question {question.question_number} — {question.topic}", level=1)
+        if question.page_numbers:
+            document.add_paragraph("Source page(s): " + ", ".join(map(str, question.page_numbers)))
+        for part in question.parts:
+            document.add_heading(
+                f"{part.label} — {part.marks_available} marks ({part.mark_source})",
+                level=2,
+            )
+            if part.question_text.strip():
+                document.add_paragraph(part.question_text.strip())
+
+            for index, step in enumerate(part.worked_steps, 1):
+                paragraph = document.add_paragraph(style="List Number")
+                paragraph.add_run(step.explanation.strip() or f"Step {index}")
+                for equation in step.equations:
+                    if str(equation).strip():
+                        document.add_paragraph(str(equation).strip())
+
+            if part.final_answer_mathio.strip():
+                p = document.add_paragraph()
+                r = p.add_run("Final answer: ")
+                r.bold = True
+                p.add_run(part.final_answer_mathio.strip())
+
+            if part.marking_points:
+                document.add_heading("Suggested marking guide", level=3)
+                for point in part.marking_points:
+                    p = document.add_paragraph(style="List Bullet")
+                    p.add_run(f"{point.code} [{point.marks}] ").bold = True
+                    p.add_run(point.description)
+                    if point.allow_follow_through:
+                        p.add_run(" — follow-through allowed")
+
+            if part.common_errors:
+                document.add_heading("Common errors", level=3)
+                for error in part.common_errors:
+                    document.add_paragraph(error, style="List Bullet")
+
+        document.add_paragraph(f"Question total: {question.total_marks} marks")
+
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def render_paper_question_solution(solution: PaperQuestionSolution) -> None:
+    title = f"Question {solution.question_number} · {solution.topic}"
+    with st.expander(title, expanded=False):
+        if solution.page_numbers:
+            st.caption("Paper page(s): " + ", ".join(map(str, solution.page_numbers)))
+        st.caption(f"Verification confidence: {solution.confidence.title()}")
+        if solution.verification_note.strip():
+            st.info(solution.verification_note)
+
+        for part in solution.parts:
+            st.markdown(f"### {part.label}")
+            if part.question_text.strip():
+                st.write(part.question_text)
+            for idx, step in enumerate(part.worked_steps, 1):
+                render_guidance_step(idx, step)
+            if part.final_answer_mathio.strip():
+                st.markdown("#### Final answer")
+                render_mathio(part.final_answer_mathio)
+
+            st.markdown(
+                f"#### Suggested marking guide · {part.marks_available} marks"
+                + (" · printed allocation" if part.mark_source == "printed" else " · AI-suggested allocation")
+            )
+            if part.marking_points:
+                table = pd.DataFrame(
+                    [
+                        {
+                            "Code": point.code,
+                            "Marks": point.marks,
+                            "Criterion": point.description,
+                            "Follow-through": "Yes" if point.allow_follow_through else "",
+                        }
+                        for point in part.marking_points
+                    ]
+                )
+                st.dataframe(table, hide_index=True, use_container_width=True)
+            else:
+                st.caption("No marking points were generated for this part.")
+
+            if part.common_errors:
+                with st.expander("Common errors to watch for", expanded=False):
+                    for error in part.common_errors:
+                        st.markdown(f"- {error}")
+
+        st.markdown(f"**Question total: {solution.total_marks} marks**")
+
+
 def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:
     files = files or []
     assets: list[UploadedAsset] = []
@@ -3544,9 +3817,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ai_tab, batch_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
+ai_tab, paper_tab, batch_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
     [
         "✨ Analyse",
+        "📝 Full paper",
         "👥 Class trends",
         "🧠 Offline practice",
         "✎ Algebra check",
@@ -3561,6 +3835,191 @@ st.session_state.setdefault("ai_guided_error", "")
 st.session_state.setdefault("guided_hint_count", 0)
 st.session_state.setdefault("guided_reveal_step", 0)
 st.session_state.setdefault("guided_support_mode", "Hints only")
+st.session_state.setdefault("paper_detection", None)
+st.session_state.setdefault("paper_solutions", [])
+st.session_state.setdefault("paper_errors", [])
+st.session_state.setdefault("paper_signature", "")
+
+# ---------- Full paper worked solutions ----------
+with paper_tab:
+    st.markdown('<div class="omt-section-kicker">Teacher / revision workflow</div>', unsafe_allow_html=True)
+    st.markdown('<div class="omt-section-title">Full paper worked solutions + marking guide</div>', unsafe_allow_html=True)
+    st.write(
+        "Upload a complete PDF or Word exam paper. The tutor detects every main question and subpart, "
+        "then generates verified worked solutions and an AI-suggested marking guide."
+    )
+    st.warning(
+        "The marking guide is a teaching aid, not an official SEAB/MOE mark scheme. "
+        "For formal grading, use the official marking scheme where available."
+    )
+
+    paper_file = st.file_uploader(
+        "Upload full exam paper",
+        type=["pdf", "docx", "doc"],
+        accept_multiple_files=False,
+        key="full_paper_upload",
+        help="PDF and modern Word .docx files are supported. Legacy .doc files should be saved as .docx or PDF.",
+    )
+    paper_title = st.text_input(
+        "Paper title (optional)",
+        key="full_paper_title",
+        placeholder="Example: 2027 G3 Mathematics Revision Paper 1",
+    )
+
+    if paper_file is not None:
+        signature = f"{paper_file.name}:{getattr(paper_file, 'size', 0)}"
+        if st.session_state.paper_signature != signature:
+            st.session_state.paper_signature = signature
+            st.session_state.paper_detection = None
+            st.session_state.paper_solutions = []
+            st.session_state.paper_errors = []
+
+        try:
+            paper_text, paper_assets = full_paper_input(paper_file)
+            st.success(
+                f"Loaded {paper_file.name}"
+                + (f" · extracted {len(paper_text):,} characters of Word text" if paper_text else "")
+            )
+
+            if st.button("1 · Detect all questions and subparts", use_container_width=True):
+                with st.spinner("Reading the full paper structure..."):
+                    detection = detect_questions_in_assets(
+                        track_label=track_label,
+                        question_assets=paper_assets,
+                        paper_text=paper_text,
+                        api_key=explicit_key,
+                        model=model,
+                    )
+                st.session_state.paper_detection = detection
+                st.session_state.paper_solutions = []
+                st.session_state.paper_errors = []
+                st.rerun()
+
+            detection = st.session_state.get("paper_detection")
+            if detection is not None:
+                st.markdown("### Detected paper structure")
+                st.success(
+                    f"Detected {detection.main_question_count} main question(s)"
+                    + (
+                        f"; {sum(len(q.subparts) for q in detection.questions)} subpart(s)."
+                        if detection.questions else "."
+                    )
+                )
+                if detection.notes:
+                    for note in detection.notes:
+                        st.caption(f"• {note}")
+
+                preview_rows = []
+                for q in detection.questions:
+                    preview_rows.append(
+                        {
+                            "Question": q.question_number,
+                            "Topic": q.topic_hint,
+                            "Subparts": ", ".join(p.label for p in q.subparts) or "Whole question",
+                            "Pages": ", ".join(map(str, q.page_numbers)) or "—",
+                            "Confidence": q.confidence.title(),
+                        }
+                    )
+                if preview_rows:
+                    st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
+
+                st.caption(
+                    "Generation verifies each question independently. Geometry/shaded-area questions use the topology-first accuracy checks."
+                )
+
+                if st.button(
+                    "2 · Generate full worked solutions + marking guide",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    st.session_state.paper_solutions = []
+                    st.session_state.paper_errors = []
+                    progress = st.progress(0.0, text="Starting paper solution generation...")
+                    total_questions = max(1, len(detection.questions))
+
+                    solutions: list[PaperQuestionSolution] = []
+                    errors: list[str] = []
+                    for index, detected_question in enumerate(detection.questions, 1):
+                        progress.progress(
+                            (index - 1) / total_questions,
+                            text=f"Solving Question {detected_question.question_number} ({index}/{total_questions})...",
+                        )
+                        try:
+                            scoped_assets = scoped_assets_for_paper_question(
+                                paper_assets,
+                                detected_question.page_numbers,
+                            )
+                            solution = generate_paper_question_solution(
+                                track_label=track_label,
+                                detected_question=detected_question,
+                                question_assets=scoped_assets,
+                                paper_text_context=paper_text,
+                                api_key=explicit_key,
+                                model=model,
+                            )
+                            solutions.append(solution)
+                        except GeminiTutorError as exc:
+                            errors.append(f"Question {detected_question.question_number}: {exc}")
+                        except Exception as exc:
+                            errors.append(
+                                f"Question {detected_question.question_number}: unexpected generation error."
+                            )
+
+                    progress.progress(1.0, text="Paper generation complete.")
+                    st.session_state.paper_solutions = solutions
+                    st.session_state.paper_errors = errors
+                    st.rerun()
+
+                solutions = st.session_state.get("paper_solutions") or []
+                errors = st.session_state.get("paper_errors") or []
+
+                if errors:
+                    st.warning(
+                        f"{len(errors)} question(s) could not be completed reliably. "
+                        "They are listed below rather than guessed."
+                    )
+                    for error in errors:
+                        st.error(error)
+
+                if solutions:
+                    st.markdown("## Worked solutions")
+                    total_marks = sum(solution.total_marks for solution in solutions)
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Questions completed", len(solutions))
+                    c2.metric("Suggested / printed marks", total_marks)
+                    c3.metric("Questions needing review", len(errors))
+
+                    for solution in solutions:
+                        render_paper_question_solution(solution)
+
+                    markdown_export = paper_solution_markdown(
+                        track_label=track_label,
+                        paper_title=paper_title or Path(paper_file.name).stem,
+                        solutions=solutions,
+                    )
+                    docx_export = build_paper_solution_docx(
+                        track_label=track_label,
+                        paper_title=paper_title or Path(paper_file.name).stem,
+                        solutions=solutions,
+                    )
+                    d1, d2 = st.columns(2)
+                    d1.download_button(
+                        "Download solutions as Markdown",
+                        data=markdown_export.encode("utf-8"),
+                        file_name=f"{Path(paper_file.name).stem}_worked_solutions.md",
+                        mime="text/markdown",
+                        use_container_width=True,
+                    )
+                    d2.download_button(
+                        "Download solutions + marking guide as Word",
+                        data=docx_export,
+                        file_name=f"{Path(paper_file.name).stem}_worked_solutions_marking_guide.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True,
+                    )
+        except GeminiTutorError as exc:
+            st.error(str(exc))
+
 
 # ---------- Gemini online analysis ----------
 with ai_tab:
