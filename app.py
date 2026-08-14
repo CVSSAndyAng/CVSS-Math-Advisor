@@ -11,7 +11,6 @@ import re
 import secrets
 import zipfile
 from io import BytesIO
-from pathlib import Path
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
@@ -3228,7 +3227,7 @@ def extract_docx_exam(file_obj: Any) -> tuple[str, list[UploadedAsset]]:
             ]
             for index, name in enumerate(media_names, 1):
                 blob = archive.read(name)
-                suffix = Path(name).suffix.lower()
+                suffix = os.path.splitext(name)[1].lower()
                 mime = {
                     ".png": "image/png",
                     ".jpg": "image/jpeg",
@@ -3238,7 +3237,7 @@ def extract_docx_exam(file_obj: Any) -> tuple[str, list[UploadedAsset]]:
                 if mime:
                     assets.append(
                         UploadedAsset(
-                            name=f"{Path(file_obj.name).stem}_image_{index}{suffix}",
+                            name=f"{os.path.splitext(file_obj.name)[0]}_image_{index}{suffix}",
                             mime_type=mime,
                             data=blob,
                         )
@@ -3258,7 +3257,7 @@ def full_paper_input(file_obj: Any) -> tuple[str, list[UploadedAsset]]:
     if len(data) > FULL_PAPER_MAX_BYTES:
         raise GeminiTutorError("The exam paper is larger than the 30 MB full-paper limit.", category="input")
 
-    suffix = Path(file_obj.name).suffix.lower()
+    suffix = os.path.splitext(file_obj.name)[1].lower()
     if suffix == ".pdf":
         return "", [
             UploadedAsset(
@@ -3292,7 +3291,7 @@ def scope_pdf_asset_to_pages(asset: UploadedAsset, pages: list[int]) -> Uploaded
         output = BytesIO()
         writer.write(output)
         return UploadedAsset(
-            name=f"{Path(asset.name).stem}_pages_{'-'.join(map(str, valid_pages))}.pdf",
+            name=f"{os.path.splitext(asset.name)[0]}_pages_{'-'.join(map(str, valid_pages))}.pdf",
             mime_type="application/pdf",
             data=output.getvalue(),
         )
@@ -3995,26 +3994,26 @@ with paper_tab:
 
                     markdown_export = paper_solution_markdown(
                         track_label=track_label,
-                        paper_title=paper_title or Path(paper_file.name).stem,
+                        paper_title=paper_title or os.path.splitext(paper_file.name)[0],
                         solutions=solutions,
                     )
                     docx_export = build_paper_solution_docx(
                         track_label=track_label,
-                        paper_title=paper_title or Path(paper_file.name).stem,
+                        paper_title=paper_title or os.path.splitext(paper_file.name)[0],
                         solutions=solutions,
                     )
                     d1, d2 = st.columns(2)
                     d1.download_button(
                         "Download solutions as Markdown",
                         data=markdown_export.encode("utf-8"),
-                        file_name=f"{Path(paper_file.name).stem}_worked_solutions.md",
+                        file_name=f"{os.path.splitext(paper_file.name)[0]}_worked_solutions.md",
                         mime="text/markdown",
                         use_container_width=True,
                     )
                     d2.download_button(
                         "Download solutions + marking guide as Word",
                         data=docx_export,
-                        file_name=f"{Path(paper_file.name).stem}_worked_solutions_marking_guide.docx",
+                        file_name=f"{os.path.splitext(paper_file.name)[0]}_worked_solutions_marking_guide.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         use_container_width=True,
                     )
