@@ -2772,39 +2772,128 @@ div[data-testid="stVerticalBlock"] > div:has(.omt-guidance-item) {
 </style>""", unsafe_allow_html=True)
 
 def clean_guidance_text(value: str) -> str:
-    """Remove model-generated bullet LaTeX and normalize spacing for prose."""
+    """Sanitize model-generated guidance without turning prose into mathematics."""
     text = str(value or "").strip()
-    text = re.sub(r"\\textbullet\s*", "", text)
-    text = re.sub(r"\\bullet\s*", "", text)
+
+    # Remove one or more literal backslashes before bullet commands. This handles
+    # \textbullet, \\textbullet and similar escaped variants returned by models.
+    text = re.sub(r"\\+(?:textbullet|bullet)\b\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^\s*[•●▪◦*-]+\s*", "", text)
-    # Common model failure: prose wrapped in LaTeX text commands.
-    text = re.sub(r"\\text\{([^{}]*)\}", r"\1", text)
-    text = re.sub(r"\\mathrm\{([^{}]*)\}", r"\1", text)
+
+    # Unwrap LaTeX text-formatting commands when they were incorrectly used for prose.
+    # Repeat a few times to handle nested/simple escaped values.
+    for _ in range(3):
+        new_text = re.sub(r"\\+(?:text|mathrm|mathbf|operatorname)\{([^{}]*)\}", r"\1", text)
+        if new_text == text:
+            break
+        text = new_text
+
+    # Fix common prose-without-spaces artifacts caused by MathIO/LaTeX generation.
+    text = text.replace("90degrees", "90°")
     text = re.sub(r"\s{2,}", " ", text).strip()
-    # Suppress items that contain no meaningful content after cleaning.
+
+    # Suppress empty/punctuation-only guidance items.
     if not re.search(r"[A-Za-z0-9]", text):
         return ""
     return text
 
 
-def guidance_item(value: str) -> None:
-    """Render one compact guidance item; do not create an empty bullet row."""
+def _plainify_embedded_math(text: str) -> str:
+    """Make small math fragments readable when embedded inside prose.
+
+    Standalone equations still use MathIO. This function is only for a sentence that
+    is mostly English prose but contains a few raw LaTeX commands.
+    """
+    value = text
+
+    replacements = {
+        r"\pi": "π",
+        r"\theta": "θ",
+        r"\alpha": "α",
+        r"\beta": "β",
+        r"\gamma": "γ",
+        r"\times": "×",
+        r"\cdot": "·",
+        r"\div": "÷",
+        r"\pm": "±",
+        r"\leq": "≤",
+        r"\geq": "≥",
+        r"\neq": "≠",
+        r"\circ": "°",
+    }
+    for src, dst in replacements.items():
+        value = value.replace(src, dst)
+
+    # Simple fractions frequently appearing inside explanatory sentences.
+    # Leave complex/nested fractions for standalone MathIO rendering.
+    value = re.sub(
+        r"\\frac\{([^{}]+)\}\{([^{}]+)\}",
+        lambda m: f"({m.group(1)})/({m.group(2)})",
+        value,
+    )
+    value = re.sub(r"\^\{([^{}]+)\}", r"^(\1)", value)
+    value = re.sub(r"_\{([^{}]+)\}", r"_(\1)", value)
+    value = value.replace(r"\,", " ").replace(r"\;", " ")
+    return re.sub(r"\s{2,}", " ", value).strip()
+
+
+def _looks_like_standalone_math(text: str) -> bool:
+    """True when a value is primarily an equation/expression rather than prose."""
+    value = clean_guidance_text(text)
+    if not value:
+        return False
+
+    words = re.findall(r"[A-Za-z]{3,}", value)
+    math_signals = len(re.findall(
+        r"[=+\-×÷*/^]|\\(?:frac|sqrt|pi|theta|sin|cos|tan|log|ln)\b",
+        value,
+    ))
+    # A short expression with strong mathematical syntax is safe for MathIO.
+    return math_signals >= 1 and len(words) <= 4
+
+
+def render_guidance_content(value: str) -> None:
+    """Render guidance as readable prose, using MathIO only for real equations."""
     text = clean_guidance_text(value)
     if not text:
         return
-    # Keep the bullet and its content in the same rendered flow so Streamlit
-    # does not create a detached bullet on a separate line.
-    render_mathio_mixed(f"• {text}")
+
+    if _looks_like_standalone_math(text):
+        render_mathio(text)
+        return
+
+    # Do not feed a whole English sentence into MathIO merely because it contains
+    # \pi, \frac, etc. Convert small embedded fragments to readable inline symbols.
+    readable = _plainify_embedded_math(text)
+    st.markdown(readable)
+
+
+def guidance_item(value: str) -> None:
+    """Render one compact bullet only when meaningful text exists."""
+    text = clean_guidance_text(value)
+    if not text:
+        return
+    readable = _plainify_embedded_math(text)
+    st.markdown(f"- {readable}")
 
 
 def render_guidance_step(step_number: int, value: str) -> None:
-    """Keep explanatory prose as prose; render only genuine equations as MathIO."""
+    """Readable guided step: normal prose, with equation-only lines in MathIO."""
     text = clean_guidance_text(value)
+    if not text:
+        return
+
     with st.container(border=True):
         st.markdown(f"#### Step {step_number}")
-        # render_mathio_mixed separates ordinary language from maths instead of
-        # turning the whole sentence into a compressed italic equation.
-        render_mathio_mixed(text)
+
+        # Split on explicit line breaks. New prompts ask Gemini to put equations on
+        # their own line, which lets us preserve MathIO without italicizing prose.
+        lines = [line.strip() for line in re.split(r"[\r\n]+", text) if line.strip()]
+        if not lines:
+            return
+
+        for line in lines:
+            render_guidance_content(line)
 
 
 def _switch_guided_to_full() -> None:
@@ -2837,7 +2926,7 @@ def render_guided_solution(g: GuidedSolution) -> None:
 
     with st.container(border=True):
         st.markdown("### 🎯 Goal")
-        render_mathio_mixed(clean_guidance_text(g.interpreted_goal))
+        render_guidance_content(g.interpreted_goal)
 
         known_items = [clean_guidance_text(item) for item in g.known_information]
         known_items = [item for item in known_items if item]
@@ -2867,13 +2956,13 @@ def render_guided_solution(g: GuidedSolution) -> None:
     if support_mode == "Hints only":
         with st.container(border=True):
             st.markdown("### 💡 Hints")
-            render_mathio_mixed(clean_guidance_text(g.first_question_for_student))
+            render_guidance_content(g.first_question_for_student)
 
             hint_count = int(st.session_state.get("guided_hint_count", 0))
             for i, hint in enumerate(g.hint_ladder[:hint_count], 1):
                 with st.container(border=True):
                     st.markdown(f"**Hint {i}**")
-                    render_mathio_mixed(clean_guidance_text(hint))
+                    render_guidance_content(hint)
 
             if hint_count < len(g.hint_ladder):
                 st.button(

@@ -1503,6 +1503,28 @@ REQUIREMENTS
 - Do not use \\textbullet or \\bullet.
 - final_answer_mathio must contain the verified final answer.
 
+
+GUIDANCE DISPLAY CONTRACT
+- Never emit \textbullet or \bullet.
+- Do not put bullet symbols inside field values; the UI creates bullets itself.
+- Write explanatory language as ordinary English prose.
+- Never wrap an entire sentence in LaTeX or MathIO syntax.
+- If a step contains an equation, put the explanatory sentence first and put the equation on a NEW LINE.
+- Use raw MathIO/LaTeX only on that equation line.
+- Preserve normal spaces between words.
+- Every guided step must be complete; never end a step with an unfinished "=" or unfinished sentence.
+
+
+GUIDANCE DISPLAY CONTRACT
+- Never emit \textbullet or \bullet.
+- Do not put bullet symbols inside field values; the UI creates bullets itself.
+- Write explanatory language as ordinary English prose.
+- Never wrap an entire sentence in LaTeX or MathIO syntax.
+- If a step contains an equation, put the explanatory sentence first and put the equation on a NEW LINE.
+- Use raw MathIO/LaTeX only on that equation line.
+- Preserve normal spaces between words.
+- Every guided step must be complete; never end a step with an unfinished "=" or unfinished sentence.
+
 QUESTION:
 {question_text.strip() or '[Question supplied by attachment]'}
 
@@ -1668,6 +1690,28 @@ Return structured JSON only.
             result.guided_steps = fallback_steps
             if not result.final_answer_mathio.strip():
                 result.final_answer_mathio = verification.verified_answer_mathio.strip()
+
+    # Strip bullet-formatting commands before values reach the UI.
+    def _clean_model_guidance(value: str) -> str:
+        cleaned = str(value or "").strip()
+        cleaned = re.sub(r"\\+(?:textbullet|bullet)\b\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^\s*[•●▪◦*-]+\s*", "", cleaned)
+        return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    result.interpreted_goal = _clean_model_guidance(result.interpreted_goal)
+    result.known_information = [
+        x for x in (_clean_model_guidance(v) for v in result.known_information) if x
+    ]
+    result.concepts_to_use = [
+        x for x in (_clean_model_guidance(v) for v in result.concepts_to_use) if x
+    ]
+    result.first_question_for_student = _clean_model_guidance(result.first_question_for_student)
+    result.guided_steps = [
+        x for x in (_clean_model_guidance(v) for v in result.guided_steps) if x
+    ]
+    result.common_pitfalls = [
+        x for x in (_clean_model_guidance(v) for v in result.common_pitfalls) if x
+    ]
 
     cleaned_hints = [str(h).strip() for h in result.hint_ladder if str(h).strip()]
     if len(cleaned_hints) >= 3:
