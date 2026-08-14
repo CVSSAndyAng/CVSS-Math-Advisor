@@ -9,6 +9,23 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
+
+SEC_2027_CONTEXT = {
+    "2027 SEC · G1 Mathematics (K110)": "2027 Singapore-Cambridge SEC G1 Mathematics, subject code K110; strands: Number and Algebra, Geometry and Measurement, Statistics and Probability.",
+    "2027 SEC · G2 Mathematics (K210)": "2027 Singapore-Cambridge SEC G2 Mathematics, subject code K210; strands: Number and Algebra, Geometry and Measurement, Statistics and Probability.",
+    "2027 SEC · G3 Mathematics (K310)": "2027 Singapore-Cambridge SEC G3 Mathematics, subject code K310; strands: Number and Algebra, Geometry and Measurement, Statistics and Probability.",
+    "2027 SEC · G2 Additional Mathematics (K232)": "2027 Singapore-Cambridge SEC G2 Additional Mathematics, subject code K232; strands: Algebra, Geometry and Trigonometry, Calculus. This syllabus prepares students for G3 Additional Mathematics.",
+    "2027 SEC · G3 Additional Mathematics (K341)": "2027 Singapore-Cambridge SEC G3 Additional Mathematics, subject code K341; strands: Algebra, Geometry and Trigonometry, Calculus. This syllabus assumes G3 Mathematics knowledge and prepares students for higher mathematics.",
+}
+
+
+def syllabus_context_for_track(track_label: str) -> str:
+    return SEC_2027_CONTEXT.get(
+        track_label,
+        f"Selected Singapore mathematics track: {track_label}. Use the syllabus level named by the user and do not silently promote or simplify the question to another level.",
+    )
+
+
 SUPPORTED_MIME_TYPES = {
     "image/png",
     "image/jpeg",
@@ -720,12 +737,12 @@ def build_analysis_input(
     offline_evidence: str = "",
 ) -> list[dict[str, str]]:
     prompt = f"""
-You are a careful Singapore secondary mathematics tutor supporting {track_label}.
+You are a careful Singapore secondary mathematics tutor supporting {track_label}.\nOFFICIAL SYLLABUS CONTEXT: {syllabus_context_for_track(track_label)}
 Analyse only the reasoning evidenced by the student's submitted working. Do not claim to read hidden thoughts,
 intelligence, motivation, personality, medical status, or learning diagnosis.
 
 CURRICULUM SCOPE
-- Work at the selected Singapore O-Level / N-Level mathematics standard.
+- Work at the selected the selected Singapore mathematics / SEC subject-level standard.
 - Use normal school mathematics notation and methods appropriate to the track.
 - The task is diagnostic tutoring, not merely producing an answer.
 
@@ -841,7 +858,7 @@ COUNTING RULES
 
 TRANSCRIPTION RULES
 - Transcribe conservatively. Do not invent missing numbers, labels, units, diagrams, or conditions.
-- Preserve mathematical meaning and normal Singapore O-Level / N-Level notation.
+- Preserve mathematical meaning and normal normal Singapore secondary mathematics notation appropriate to the selected subject level.
 - Put mathematical expressions in LaTeX using \\( ... \\) inline or \\[ ... \\] for display maths.
 - Never use dollar-sign math delimiters.
 - page_numbers are 1-based PDF page numbers where visible; for separate uploaded images, use their 1-based upload order.
@@ -920,7 +937,7 @@ CHECK EVERY RELEVANT PART
 - visual_regions.box_2d MUST be [ymin, xmin, ymax, xmax] normalized to 0..1000, tightly covering the relevant label/segment/angle/table cell/graph region.
 - A contradiction can have multiple visual_regions. For example, if two side labels conflict, return one region around each relevant label.
 - Do not invent a box when the issue is purely textual or the location is uncertain; leave visual_regions empty instead.
-- Check broad fit with the selected Singapore O-Level / N-Level track; a possible syllabus mismatch is usually a warning, not automatically a blocking defect.
+- Check broad fit with the selected selected Singapore mathematics / SEC track; a possible syllabus mismatch is usually a warning, not automatically a blocking defect.
 - Focus ONLY on the selected question when the text contains a selected-question marker. Ignore unrelated questions visible elsewhere in uploaded pages.
 
 IMPORTANT JUDGEMENT RULES
@@ -1358,7 +1375,7 @@ def generate_guided_solution(
         )
 
     prompt = f"""
-You are a Singapore secondary mathematics tutor for {track_label}.
+You are a Singapore secondary mathematics tutor for {track_label}.\nOFFICIAL SYLLABUS CONTEXT: {syllabus_context_for_track(track_label)}
 There is NO student solution to mark. Guide the student to solve the verified question.
 
 PEDAGOGY
@@ -1524,7 +1541,7 @@ def evaluate_practice_attempt(
         raise GeminiTutorError("Enter, handwrite, photograph, or upload the student's working before checking it.", category="input")
 
     prompt = f"""
-You are marking a Singapore secondary mathematics practice attempt for {track_label}.
+You are marking a Singapore secondary mathematics practice attempt for {track_label}.\nOFFICIAL SYLLABUS CONTEXT: {syllabus_context_for_track(track_label)}
 Judge the submitted reasoning, not only the final answer. Independently verify the mathematics.
 Do not penalise a different valid method. Identify the first material logic break if one exists.
 Do not infer personality, intelligence, motivation, or medical/learning conditions.
@@ -1619,7 +1636,7 @@ def generate_followup_practice_question(
     numbers, representation, or context enough to require fresh reasoning.
     """
     prompt = f"""
-You are an adaptive Singapore secondary mathematics tutor for {track_label}.
+You are an adaptive Singapore secondary mathematics tutor for {track_label}.\nOFFICIAL SYLLABUS CONTEXT: {syllabus_context_for_track(track_label)}
 Create ONE new practice question in the category: {kind}.
 
 The student is not yet ready to leave this category. The new question must focus on
@@ -1651,7 +1668,7 @@ ADAPTIVE RULES
 - Test the SAME core skill/gap again.
 - Do not copy the previous question or merely change one number.
 - Use new values and, where suitable for this category, a different representation or surface form.
-- Keep it appropriate to the selected Singapore O-Level / N-Level track.
+- Keep it appropriate to the selected selected Singapore mathematics / SEC track.
 - Independently verify the mathematics using code execution for every calculable claim.
 - For shaded-region geometry, explicitly determine every outer and excluded/internal boundary before constructing the reference area equation.
 - Include exactly three progressive hints.

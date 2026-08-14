@@ -53,8 +53,93 @@ from offline_engine import (
     topics_for_track,
 )
 
+
+# 2027 Singapore-Cambridge Secondary Education Certificate (SEC) mathematics tracks.
+# SEAB 2027 subject codes:
+# G1 Mathematics K110; G2 Mathematics K210; G3 Mathematics K310;
+# G2 Additional Mathematics K232; G3 Additional Mathematics K341.
+SEC_2027_TRACKS = {
+    "2027 SEC · G1 Mathematics (K110)": {
+        "engine_code": "NT",
+        "subject_code": "K110",
+        "subject": "Mathematics",
+        "level": "G1",
+        "year": 2027,
+        "reference_2026": "4046",
+        "strands": ["Number and Algebra", "Geometry and Measurement", "Statistics and Probability"],
+        "offline_supported": True,
+    },
+    "2027 SEC · G2 Mathematics (K210)": {
+        "engine_code": "NA",
+        "subject_code": "K210",
+        "subject": "Mathematics",
+        "level": "G2",
+        "year": 2027,
+        "reference_2026": "4045",
+        "strands": ["Number and Algebra", "Geometry and Measurement", "Statistics and Probability"],
+        "offline_supported": True,
+    },
+    "2027 SEC · G3 Mathematics (K310)": {
+        "engine_code": "O",
+        "subject_code": "K310",
+        "subject": "Mathematics",
+        "level": "G3",
+        "year": 2027,
+        "reference_2026": "4052",
+        "strands": ["Number and Algebra", "Geometry and Measurement", "Statistics and Probability"],
+        "offline_supported": True,
+    },
+    "2027 SEC · G2 Additional Mathematics (K232)": {
+        "engine_code": "G2A",
+        "subject_code": "K232",
+        "subject": "Additional Mathematics",
+        "level": "G2",
+        "year": 2027,
+        "reference_2026": "4051",
+        "strands": ["Algebra", "Geometry and Trigonometry", "Calculus"],
+        "offline_supported": False,
+    },
+    "2027 SEC · G3 Additional Mathematics (K341)": {
+        "engine_code": "G3A",
+        "subject_code": "K341",
+        "subject": "Additional Mathematics",
+        "level": "G3",
+        "year": 2027,
+        "reference_2026": "4049",
+        "strands": ["Algebra", "Geometry and Trigonometry", "Calculus"],
+        "offline_supported": False,
+    },
+}
+
+# Keep the existing 2026 O/N-Level tracks available during the transition.
+LEGACY_TRACK_INFO = {
+    label: {
+        "engine_code": code,
+        "subject_code": {"O": "4052", "NA": "4045", "NT": "4046"}.get(code, str(code)),
+        "subject": "Mathematics",
+        "level": {"O": "O-Level", "NA": "N(A)-Level", "NT": "N(T)-Level"}.get(code, "Legacy"),
+        "year": 2026,
+        "reference_2026": {"O": "4052", "NA": "4045", "NT": "4046"}.get(code, str(code)),
+        "strands": ["Number and Algebra", "Geometry and Measurement", "Statistics and Probability"],
+        "offline_supported": True,
+    }
+    for label, code in TRACKS.items()
+}
+
+APP_TRACKS = {**SEC_2027_TRACKS, **LEGACY_TRACK_INFO}
+
+
+def selected_track_info(label: str) -> dict:
+    return APP_TRACKS[label]
+
+
+def is_additional_math_track(label: str) -> bool:
+    return selected_track_info(label)["subject"] == "Additional Mathematics"
+
+
+
 st.set_page_config(
-    page_title="Singapore O/N-Level Math Tutor — Gemini + Offline",
+    page_title="Singapore SEC / O-N Level Math Tutor — Gemini + Offline",
     page_icon="🇸🇬",
     layout="wide",
     initial_sidebar_state="auto",
@@ -2551,7 +2636,7 @@ except Exception:
 
 
 def track_code(label: str) -> str:
-    return TRACKS[label]
+    return selected_track_info(label)["engine_code"]
 
 
 def reset_current_question() -> None:
@@ -3106,6 +3191,8 @@ def render_question_feasibility(result: QuestionFeasibilityResult, question_file
 
 
 def offline_evidence_for(question_text: str, working_text: str) -> tuple[str, AttemptResult | None]:
+    if is_additional_math_track(track_label):
+        return "No deterministic offline algebra evidence is used for this Additional Mathematics track; Gemini code execution performs independent verification.", None
     if not question_text.strip() or not working_text.strip():
         return "", None
     try:
@@ -3127,20 +3214,27 @@ with st.sidebar:
         """
         <div class="omt-side-brand">
           <div class="title">✦ SG Math Tutor</div>
-          <div class="sub">Reasoning-first support for Singapore O-Level and N-Level Mathematics.</div>
+          <div class="sub">Reasoning-first support for 2027 SEC G1/G2/G3 Mathematics and Additional Mathematics, with 2026 O/N-Level transition support.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    track_label = st.selectbox("Exam track", list(TRACKS.keys()), index=0)
+    track_label = st.selectbox("Exam track", list(APP_TRACKS.keys()), index=0)
+    track_info = selected_track_info(track_label)
     tcode = track_code(track_label)
-    syllabus_name = (
-        "O-Level Mathematics · 4052" if tcode == "O"
-        else "N(A)-Level Mathematics A · 4045" if tcode == "NA"
-        else "N(T)-Level Mathematics T · 4046"
-    )
+    if track_info["year"] == 2027:
+        syllabus_name = (
+            f'2027 SEC · {track_info["level"]} {track_info["subject"]} · {track_info["subject_code"]}'
+        )
+    else:
+        syllabus_name = f'{track_info["level"]} {track_info["subject"]} · {track_info["subject_code"]}'
     st.markdown(f'<div class="omt-status-pill neutral">📘 <span>{syllabus_name}</span></div>', unsafe_allow_html=True)
+    if track_info["year"] == 2027:
+        st.caption(
+            "Singapore-Cambridge Secondary Education Certificate (SEC) · "
+            + " · ".join(track_info["strands"])
+        )
 
     with st.expander("⚙️ Gemini connection", expanded=False):
         explicit_key = st.text_input(
@@ -3396,6 +3490,9 @@ with ai_tab:
         elif not question_for_analysis.strip() and not q_files:
             st.session_state.ai_question_feasibility_error = "Provide the question as text or an upload first."
         else:
+            # This fallback only exists for the student-solution path. Initialise it
+            # before any Gemini call so guided-mode exceptions cannot trigger a NameError.
+            offline_result = None
             try:
                 assets_q = uploaded_assets(q_files)
                 with st.spinner("Checking the question for missing information, contradictions, ambiguity, and mathematical feasibility..."):
@@ -3531,9 +3628,12 @@ with ai_tab:
                 initialize_ai_practice(analysis)
                 st.rerun()
             except GeminiTutorError as exc:
-                st.session_state.ai_error = str(exc)
-                if offline_result is not None:
-                    st.session_state.ai_fallback_result = offline_result
+                if guided_mode:
+                    st.session_state.ai_guided_error = str(exc)
+                else:
+                    st.session_state.ai_error = str(exc)
+                    if offline_result is not None:
+                        st.session_state.ai_fallback_result = offline_result
                 st.rerun()
 
     guided_result = st.session_state.get("ai_guided_solution")
@@ -3969,6 +4069,13 @@ with batch_tab:
 with practice_tab:
     st.subheader("No-credit syllabus-generated practice")
     st.caption("This tab never calls Gemini. It keeps working even if the API key is missing or a free-tier quota is reached.")
+    if is_additional_math_track(track_label):
+        st.info(
+            "The deterministic offline generator is currently available for G1/G2/G3 Mathematics. "
+            "For 2027 SEC Additional Mathematics, use Gemini online analysis/guided solving so the tutor can work across "
+            "Algebra, Geometry and Trigonometry, and Calculus."
+        )
+        st.stop()
     available = topics_for_track(tcode)
     topic_labels = {f"{official_topic_code(tcode, t.code)} · {t.name}": t.code for t in available}
     c1, c2, c3 = st.columns([1.6, 1, 1])
@@ -4075,31 +4182,64 @@ with own_tab:
 
 # ---------- Coverage ----------
 with syllabus_tab:
-    st.subheader("2026 Singapore Mathematics syllabus coverage")
-    st.write(
-        "Offline generated practice spans the three syllabus strands: Number and Algebra, Geometry and Measurement, "
-        "and Statistics and Probability. Gemini online mode broadens interpretation to uploaded handwriting, diagrams, PDFs, "
-        "word problems and alternative methods, but AI feedback can still be wrong and should be reviewed for high-stakes use."
-    )
+    info = selected_track_info(track_label)
+    if info["year"] == 2027:
+        st.subheader(f'2027 SEC {info["level"]} {info["subject"]} syllabus coverage')
+        st.caption(
+            f'Official SEC subject code: {info["subject_code"]} · '
+            f'2026-and-earlier reference code: {info["reference_2026"]}'
+        )
+        st.write(
+            "The tutor uses the selected SEC subject level as context for question feasibility, mathematical verification, "
+            "student-working analysis, guided solving, and adaptive practice."
+        )
+        cols = st.columns(len(info["strands"]))
+        for col, strand in zip(cols, info["strands"]):
+            col.metric("Syllabus strand", strand)
 
-    selected = topics_for_track(tcode)
-    strong = sum(1 for t in selected if t.offline_support == "Strong")
-    partial = sum(1 for t in selected if t.offline_support == "Partial")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Topics mapped", len(selected))
-    c2.metric("Strong offline generated support", strong)
-    c3.metric("Partial offline generated support", partial)
-
-    for strand in ("Number and Algebra", "Geometry and Measurement", "Statistics and Probability"):
-        st.markdown(f"### {strand}")
-        for t in [x for x in selected if x.strand == strand]:
-            badge = "✅ Strong" if t.offline_support == "Strong" else "🟡 Partial"
-            with st.expander(f"{official_topic_code(tcode, t.code)} · {t.name} — {badge}"):
-                st.write(t.notes)
+        if info["subject"] == "Additional Mathematics":
+            st.info(
+                "2027 SEC Additional Mathematics is organised into Algebra, Geometry and Trigonometry, and Calculus. "
+                "Gemini online mode is enabled for the full selected subject context. The no-credit deterministic question "
+                "generator has not yet been expanded to Additional Mathematics, so it is intentionally disabled for this track."
+            )
+        else:
+            selected = topics_for_track(tcode)
+            strong = sum(1 for t in selected if t.offline_support == "Strong")
+            partial = sum(1 for t in selected if t.offline_support == "Partial")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Topics mapped", len(selected))
+            c2.metric("Strong offline generated support", strong)
+            c3.metric("Partial offline generated support", partial)
+            for strand in ("Number and Algebra", "Geometry and Measurement", "Statistics and Probability"):
+                st.markdown(f"### {strand}")
+                for t in [x for x in selected if x.strand == strand]:
+                    badge = "✅ Strong" if t.offline_support == "Strong" else "🟡 Partial"
+                    with st.expander(f"{official_topic_code(tcode, t.code)} · {t.name} — {badge}"):
+                        st.write(t.notes)
+    else:
+        st.subheader("2026 Singapore Mathematics syllabus coverage")
+        st.write(
+            "Offline generated practice spans Number and Algebra, Geometry and Measurement, and Statistics and Probability. "
+            "Gemini online mode broadens interpretation to uploaded handwriting, diagrams, PDFs, word problems and alternative methods."
+        )
+        selected = topics_for_track(tcode)
+        strong = sum(1 for t in selected if t.offline_support == "Strong")
+        partial = sum(1 for t in selected if t.offline_support == "Partial")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Topics mapped", len(selected))
+        c2.metric("Strong offline generated support", strong)
+        c3.metric("Partial offline generated support", partial)
+        for strand in ("Number and Algebra", "Geometry and Measurement", "Statistics and Probability"):
+            st.markdown(f"### {strand}")
+            for t in [x for x in selected if x.strand == strand]:
+                badge = "✅ Strong" if t.offline_support == "Strong" else "🟡 Partial"
+                with st.expander(f"{official_topic_code(tcode, t.code)} · {t.name} — {badge}"):
+                    st.write(t.notes)
 
     st.warning(
-        "Coverage means the tutor has practice/checking support for these areas; it does not guarantee perfect interpretation of every past-paper question. "
-        "For school assessment decisions, verify AI feedback against a teacher or official marking scheme."
+        "Coverage means the tutor has support for these areas; it does not guarantee perfect interpretation of every examination question. "
+        "For high-stakes assessment decisions, verify AI feedback against the official syllabus/marking scheme or a teacher."
     )
 
 # ---------- Progress ----------
