@@ -612,20 +612,30 @@ class MathVerificationResult(BaseModel):
 
 
 
+class GuidedStep(BaseModel):
+    explanation: str = Field(
+        description="Readable prose only. Never put LaTeX commands or equations in this field."
+    )
+    equations: list[str] = Field(
+        default_factory=list,
+        description="Zero or more standalone MathIO-ready raw LaTeX equations, with no dollar delimiters."
+    )
+
+
 class GuidedSolution(BaseModel):
     interpreted_goal: str
     known_information: list[str] = Field(default_factory=list)
     concepts_to_use: list[str] = Field(default_factory=list)
     first_question_for_student: str = Field(
-        description="A short diagnostic/scaffolding question to make the student think before seeing solution steps"
+        description="A short diagnostic/scaffolding question in readable prose"
     )
     hint_ladder: list[str] = Field(
         default_factory=list,
-        description="Exactly three progressively stronger hints, MathIO-ready mathematics with no dollar delimiters"
+        description="Three progressively stronger readable hints; avoid raw LaTeX except very short symbol names"
     )
-    guided_steps: list[str] = Field(
+    guided_steps: list[GuidedStep] = Field(
         default_factory=list,
-        description="Ordered solution steps. Each item should be concise and MathIO-ready where mathematics is used."
+        description="Ordered worked solution. Prose and equations MUST be separated."
     )
     final_answer_mathio: str = Field(
         default="",
@@ -636,15 +646,27 @@ class GuidedSolution(BaseModel):
 
 
 class GuidedStepsRecovery(BaseModel):
-    guided_steps: list[str] = Field(
+    guided_steps: list[GuidedStep] = Field(
         min_length=1,
-        description="A concise, ordered, verified worked solution. Each step should be a readable sentence with MathIO-ready maths only where needed.",
+        description="Ordered worked solution with prose in explanation and maths only in equations.",
     )
     final_answer_mathio: str = Field(
         default="",
         description="Verified final answer as MathIO-ready raw LaTeX with no dollar delimiters",
     )
 
+
+
+class GeometryAuditResult(BaseModel):
+    verdict: Literal["confirmed", "corrected", "uncertain"]
+    boundary_interpretation: list[str] = Field(default_factory=list)
+    independent_method: str = Field(
+        description="Short description of an independent geometric/numerical cross-check"
+    )
+    checked_facts: list[str] = Field(default_factory=list)
+    corrected_answer_mathio: str = Field(default="")
+    corrected_summary: str
+    confidence: Literal["high", "medium", "low"]
 
 
 class GeminiTutorError(RuntimeError):
@@ -665,6 +687,81 @@ def _interaction_used_code_execution(interaction: object) -> bool:
         if getattr(step, "type", "") in {"code_execution_call", "code_execution_result"}:
             return True
     return False
+
+
+def _audit_shaded_geometry(
+    *,
+    active_client,
+    track_label: str,
+    question_text: str,
+    question_assets: list[UploadedAsset],
+    proposed: MathVerificationResult,
+    model: str | None,
+) -> GeometryAuditResult:
+    """Second independent audit for shaded/composite geometry.
+
+    This deliberately uses code execution again so a plausible but wrong symbolic
+    decomposition cannot become the tutor's authoritative answer.
+    """
+    prompt = f"""
+You are a skeptical geometry auditor for {track_label}.
+
+Audit the PROPOSED verification of the uploaded shaded-area question. Do NOT trust
+the proposed answer merely because it looks plausible.
+
+MANDATORY:
+1. Re-identify the shaded region from the question/diagram.
+2. List its actual boundary arcs/segments.
+3. Derive the area independently from the proposed method where possible.
+4. USE Python code execution for an independent numerical cross-check.
+   - For overlapping circles, assign coordinates to centres and numerically estimate
+     the common/intersection region from the circle inequalities or integration.
+   - Compare the numerical estimate with every symbolic candidate.
+5. If the proposed answer is wrong, return verdict="corrected" and supply the corrected
+   exact MathIO answer and concise checked facts.
+6. If the image is genuinely too ambiguous to know which region is shaded, return
+   verdict="uncertain". Do not use uncertainty for formatting/schema issues.
+
+QUESTION:
+{question_text.strip() or '[Question supplied by attachment]'}
+
+PROPOSED VERIFICATION:
+{proposed.model_dump_json(indent=2)}
+""".strip()
+
+    inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for i, asset in enumerate(question_assets, 1):
+        inputs.append({"type": "text", "text": f"Question source {i}: {asset.name}"})
+        inputs.append(_encode_asset(asset))
+
+    # First produce independently checked evidence with code execution.
+    audit_interaction = active_client.interactions.create(
+        model=get_model(model),
+        store=False,
+        input=inputs,
+        tools=_code_execution_tool(),
+    )
+    audit_evidence = (audit_interaction.output_text or "").strip()
+
+    # Then normalize to a strict schema.
+    structured = active_client.interactions.create(
+        model=get_model(model),
+        store=False,
+        input=[{
+            "type": "text",
+            "text": (
+                "Convert this geometry audit into the required JSON schema. "
+                "Preserve the mathematical verdict and corrected answer exactly. "
+                "Do not introduce new mathematics.\n\n" + audit_evidence
+            ),
+        }],
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": GeometryAuditResult.model_json_schema(),
+        },
+    )
+    return GeometryAuditResult.model_validate_json(structured.output_text)
 
 
 def verify_question_math(
@@ -704,6 +801,9 @@ MANDATORY GEOMETRY BOUNDARY PROTOCOL
 - boundary_check_complete may be true only if the boundary trace closes and no relevant edge/arc is omitted.
 - If the boundaries cannot be identified reliably from the question, use status="needs_clarification" and boundary_check_complete=false.
 - Never infer a composite-area formula until this boundary check is complete.
+- AFTER deriving a shaded-area formula, independently cross-check it numerically with Python using a second method whenever the geometry permits it.
+- For circle intersections/overlaps, place the centres in coordinates and use either numerical integration, polygon/arc reasoning, or dense numerical sampling to estimate the shaded area independently.
+- Compare the independent numerical estimate with the symbolic formula. If they disagree materially, reject the symbolic formula and redo the geometry.
 
 QUESTION TEXT:
 {question_text.strip() or '[Question supplied only by attachment]'}
@@ -803,6 +903,44 @@ Return structured JSON only.
 
     if result.problem_type == "shaded_area" and not result.boundary_check_complete:
         result.status = "needs_clarification"
+        return result
+
+    if result.problem_type == "shaded_area" and result.status in {"verified", "verified_with_caveats"}:
+        try:
+            audit = _audit_shaded_geometry(
+                active_client=active_client,
+                track_label=track_label,
+                question_text=question_text,
+                question_assets=question_assets,
+                proposed=result,
+                model=model,
+            )
+            if audit.verdict == "uncertain":
+                result.status = "needs_clarification"
+                result.contradictions_or_uncertainties.append(audit.corrected_summary)
+            elif audit.verdict == "corrected":
+                result.status = "verified_with_caveats"
+                if audit.corrected_answer_mathio.strip():
+                    result.verified_answer_mathio = audit.corrected_answer_mathio.strip()
+                if audit.checked_facts:
+                    result.verified_facts = audit.checked_facts
+                result.verification_summary = audit.corrected_summary
+                result.assumptions.append(
+                    "A second independent geometry audit corrected the first-pass shaded-area decomposition."
+                )
+            else:
+                if audit.checked_facts:
+                    # Prefer independently audited facts for downstream guided solving.
+                    result.verified_facts = audit.checked_facts
+                if audit.corrected_answer_mathio.strip():
+                    result.verified_answer_mathio = audit.corrected_answer_mathio.strip()
+        except Exception:
+            # Do not crash the whole tutor if the audit service fails, but do not
+            # overstate confidence in a shaded-area answer that missed its second check.
+            result.status = "verified_with_caveats"
+            result.assumptions.append(
+                "The second shaded-geometry audit was unavailable; verify the final area independently for high-stakes use."
+            )
     return result
 
 
@@ -1495,7 +1633,7 @@ Return ONLY the missing worked-solution content.
 
 REQUIREMENTS
 - Produce between 2 and 8 concise ordered steps.
-- Each step must explain what to do and show the relevant mathematics.
+- Each step must use explanation for readable prose and equations for standalone MathIO equations.
 - Do not skip from the givens directly to the final answer.
 - For shaded/composite geometry, explicitly identify the relevant boundary/region structure before writing the area expression.
 - Use readable prose. Do NOT wrap whole sentences in LaTeX.
@@ -1596,6 +1734,8 @@ PEDAGOGY
 - Begin with one short question that makes the student identify the relevant concept or first step.
 - Provide three progressive hints: Hint 1 should be conceptual, Hint 2 should identify the relationship/formula, and Hint 3 should help set up the first calculation without revealing the final answer.
 - Then provide a concise, correct sequence of guided steps that the app can reveal one at a time.
+- Each guided step MUST use the structured fields: explanation = ordinary readable prose only; equations = a list of standalone MathIO-ready equations only.
+- Never place \frac, \sqrt, powers, or other LaTeX commands inside explanation.
 - Use syllabus-appropriate methods and accept more than one valid method where appropriate.
 - Keep prose concise and student-friendly.
 
@@ -1612,13 +1752,20 @@ MATH DISPLAY
 - Ordinary explanations MUST be normal readable prose, not LaTeX.
 - NEVER use \\textbullet, \\bullet, \\text{...}, or \\mathrm{...} to format prose or list items.
 - Do not wrap an entire explanatory sentence as a mathematical expression.
-- Each known_information, concept, hint and guided step should be a clean sentence; include LaTeX only for the actual mathematical symbols/equations.
+- Each known_information, concept and hint should be readable prose.
+- In guided_steps, explanation contains prose only and equations contains all mathematics.
 
 QUESTION:
 {question_text.strip() or '[Question supplied by attachment]'}
 
 INDEPENDENT VERIFICATION:
 {verification.model_dump_json(indent=2)}
+
+CONSISTENCY RULE:
+- Treat verified_answer_mathio and verified_facts above as authoritative.
+- Your worked steps must lead to that verified answer.
+- If your own derivation seems to disagree, re-check the derivation instead of changing the verified answer.
+- For shaded-area geometry, do not use an area decomposition that conflicts with the audited boundary interpretation or numerical cross-check.
 
 Return structured JSON only.
 """.strip()
@@ -1664,7 +1811,7 @@ Return structured JSON only.
                 verification=verification,
                 model=model,
             )
-            result.guided_steps = [str(step).strip() for step in recovered.guided_steps if str(step).strip()]
+            result.guided_steps = recovered.guided_steps
             if recovered.final_answer_mathio.strip():
                 result.final_answer_mathio = recovered.final_answer_mathio.strip()
         except Exception:
@@ -1677,15 +1824,28 @@ Return structured JSON only.
                     f"{b.label}: {b.description}" for b in verification.geometry_boundaries
                 )
                 fallback_steps.append(
-                    "Identify the boundary of the shaded region before forming an area equation: "
-                    + boundary_text
+                    GuidedStep(
+                        explanation="Identify the boundary of the shaded region before forming an area equation: " + boundary_text,
+                        equations=[],
+                    )
                 )
-            fallback_steps.extend(facts[:5])
+            fallback_steps.extend(
+                GuidedStep(explanation=fact, equations=[]) for fact in facts[:5]
+            )
             if not fallback_steps:
                 fallback_steps = [
-                    "List the known information and identify exactly what the question asks you to find.",
-                    "Choose the syllabus-appropriate mathematical relationship that connects the known information to the unknown.",
-                    "Substitute the given values carefully and simplify step by step.",
+                    GuidedStep(
+                        explanation="List the known information and identify exactly what the question asks you to find.",
+                        equations=[],
+                    ),
+                    GuidedStep(
+                        explanation="Choose the syllabus-appropriate mathematical relationship that connects the known information to the unknown.",
+                        equations=[],
+                    ),
+                    GuidedStep(
+                        explanation="Substitute the given values carefully and simplify step by step.",
+                        equations=[],
+                    ),
                 ]
             result.guided_steps = fallback_steps
             if not result.final_answer_mathio.strip():
@@ -1706,12 +1866,21 @@ Return structured JSON only.
         x for x in (_clean_model_guidance(v) for v in result.concepts_to_use) if x
     ]
     result.first_question_for_student = _clean_model_guidance(result.first_question_for_student)
-    result.guided_steps = [
-        x for x in (_clean_model_guidance(v) for v in result.guided_steps) if x
-    ]
+    cleaned_steps: list[GuidedStep] = []
+    for step in result.guided_steps:
+        explanation = _clean_model_guidance(step.explanation)
+        equations = [str(eq).strip() for eq in step.equations if str(eq).strip()]
+        if explanation or equations:
+            cleaned_steps.append(GuidedStep(explanation=explanation, equations=equations))
+    result.guided_steps = cleaned_steps
     result.common_pitfalls = [
         x for x in (_clean_model_guidance(v) for v in result.common_pitfalls) if x
     ]
+
+    # The independent verifier/auditor is authoritative. Guided generation must never
+    # replace its checked final answer with a conflicting expression.
+    if verification.verified_answer_mathio.strip():
+        result.final_answer_mathio = verification.verified_answer_mathio.strip()
 
     cleaned_hints = [str(h).strip() for h in result.hint_ladder if str(h).strip()]
     if len(cleaned_hints) >= 3:
@@ -1720,25 +1889,25 @@ Return structured JSON only.
         # Use the first guided step as a stronger third hint without revealing
         # the final answer. This preserves the progressive-hint experience.
         stronger = (
-            f"Set up the first solution step using this idea: {result.guided_steps[0]}"
+            f"Set up the first solution step using this idea: {result.guided_steps[0].explanation}"
             if result.guided_steps
             else "Write the relevant formula or relationship, then substitute only the information given in the question."
         )
         result.hint_ladder = [*cleaned_hints, stronger]
     elif len(cleaned_hints) == 1:
         middle = (
-            f"Identify the quantities needed for the first step: {result.guided_steps[0]}"
+            f"Identify the quantities needed for the first step: {result.guided_steps[0].explanation}"
             if result.guided_steps
             else "Identify the relevant formula or relationship and match each known quantity to it."
         )
         stronger = (
-            f"Now set up the calculation for the first step: {result.guided_steps[0]}"
+            f"Now set up the calculation for the first step: {result.guided_steps[0].explanation}"
             if result.guided_steps
             else "Set up the first calculation carefully, but do not jump straight to the final answer."
         )
         result.hint_ladder = [cleaned_hints[0], middle, stronger]
     else:
-        first_step = result.guided_steps[0] if result.guided_steps else ""
+        first_step = result.guided_steps[0].explanation if result.guided_steps else ""
         result.hint_ladder = [
             "Identify what the question is asking you to find and list the information that is given.",
             "Choose the mathematical relationship or formula that connects the known information to the unknown.",

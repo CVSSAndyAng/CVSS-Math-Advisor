@@ -2877,23 +2877,32 @@ def guidance_item(value: str) -> None:
     st.markdown(f"- {readable}")
 
 
-def render_guidance_step(step_number: int, value: str) -> None:
-    """Readable guided step: normal prose, with equation-only lines in MathIO."""
-    text = clean_guidance_text(value)
-    if not text:
+def render_guidance_step(step_number: int, value) -> None:
+    """Render guided steps with prose and mathematics in separate channels.
+
+    New guided responses use GuidedStep(explanation, equations). Older cached string
+    steps remain supported for backwards compatibility.
+    """
+    if hasattr(value, "explanation"):
+        explanation = clean_guidance_text(getattr(value, "explanation", ""))
+        equations = [
+            str(eq).strip()
+            for eq in (getattr(value, "equations", []) or [])
+            if str(eq).strip()
+        ]
+    else:
+        explanation = clean_guidance_text(str(value or ""))
+        equations = []
+
+    if not explanation and not equations:
         return
 
     with st.container(border=True):
         st.markdown(f"#### Step {step_number}")
-
-        # Split on explicit line breaks. New prompts ask Gemini to put equations on
-        # their own line, which lets us preserve MathIO without italicizing prose.
-        lines = [line.strip() for line in re.split(r"[\r\n]+", text) if line.strip()]
-        if not lines:
-            return
-
-        for line in lines:
-            render_guidance_content(line)
+        if explanation:
+            st.markdown(explanation)
+        for equation in equations:
+            render_mathio(equation)
 
 
 def _switch_guided_to_full() -> None:
@@ -3034,7 +3043,10 @@ def render_guided_solution(g: GuidedSolution) -> None:
         if reveal >= total_steps:
             with st.container(border=True):
                 st.markdown("### ✅ Verified final answer")
-                render_mathio(clean_guidance_text(g.final_answer_mathio))
+                if str(g.final_answer_mathio or "").strip():
+                    render_mathio(str(g.final_answer_mathio).strip())
+                else:
+                    st.warning("The verifier did not return a final answer for this question.")
 
                 if g.common_pitfalls:
                     with st.expander("Common mistakes to avoid", expanded=False):
