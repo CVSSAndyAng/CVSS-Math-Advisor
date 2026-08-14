@@ -2743,43 +2743,92 @@ def call_analyze_submission_compat(**kwargs):
         return analyze_submission(**kwargs)
 
 
+
+
+st.markdown("""<style>
+/* Guided-solving readability */
+.omt-guidance-item {
+    font-size: 1rem;
+    line-height: 1.65;
+    margin: 0.35rem 0 0.55rem 0;
+}
+.omt-guidance-item p {
+    margin: 0;
+}
+</style>""", unsafe_allow_html=True)
+
+def clean_guidance_text(value: str) -> str:
+    """Remove model-generated bullet LaTeX and normalize spacing for prose."""
+    text = str(value or "").strip()
+    text = re.sub(r"\\textbullet\s*", "", text)
+    text = re.sub(r"^\s*[•●▪◦*-]\s*", "", text)
+    # Common model failure: prose wrapped in LaTeX text commands.
+    text = re.sub(r"\\text\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"\\mathrm\{([^{}]*)\}", r"\1", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def guidance_item(value: str) -> None:
+    """Render a readable bullet while preserving genuine mathematical fragments."""
+    text = clean_guidance_text(value)
+    if not text:
+        return
+    st.markdown('<div class="omt-guidance-item">', unsafe_allow_html=True)
+    st.markdown("• ", unsafe_allow_html=False)
+    render_mathio_mixed(text)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_guidance_step(step_number: int, value: str) -> None:
+    """Keep explanatory prose as prose; render only genuine equations as MathIO."""
+    text = clean_guidance_text(value)
+    with st.container(border=True):
+        st.markdown(f"#### Step {step_number}")
+        # render_mathio_mixed separates ordinary language from maths instead of
+        # turning the whole sentence into a compressed italic equation.
+        render_mathio_mixed(text)
+
+
 def render_guided_solution(g: GuidedSolution) -> None:
     st.markdown('<div class="omt-section-kicker">Guided solving</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Work through the question</div>', unsafe_allow_html=True)
 
     with st.container(border=True):
-        st.markdown("#### 🎯 Goal")
-        render_mathio_mixed(g.interpreted_goal)
+        st.markdown("### 🎯 Goal")
+        render_mathio_mixed(clean_guidance_text(g.interpreted_goal))
+
         if g.known_information:
-            st.markdown("**What is given**")
+            st.markdown("#### What is given")
             for item in g.known_information:
-                render_mathio_mixed(f"• {item}")
+                guidance_item(item)
+
         if g.concepts_to_use:
-            st.markdown("**Useful concepts**")
+            st.markdown("#### Useful concepts")
             for item in g.concepts_to_use:
-                render_mathio_mixed(f"• {item}")
+                guidance_item(item)
 
     with st.container(border=True):
-        st.markdown("#### 🤔 Start here")
-        render_mathio_mixed(g.first_question_for_student)
+        st.markdown("### 🤔 Start here")
+        render_mathio_mixed(clean_guidance_text(g.first_question_for_student))
 
         hint_count = int(st.session_state.get("guided_hint_count", 0))
         if hint_count < len(g.hint_ladder):
             if st.button("Show next hint", key="guided_show_hint", use_container_width=True):
                 st.session_state.guided_hint_count = hint_count + 1
                 st.rerun()
+
         for i, hint in enumerate(g.hint_ladder[: int(st.session_state.get("guided_hint_count", 0))], 1):
-            st.markdown(f"**Hint {i}**")
-            render_mathio_mixed(hint)
+            with st.container(border=True):
+                st.markdown(f"**Hint {i}**")
+                render_mathio_mixed(clean_guidance_text(hint))
 
     reveal = int(st.session_state.get("guided_reveal_step", 0))
     if g.guided_steps:
         st.markdown("### Step-by-step guidance")
+        st.caption("Read the explanation first; mathematical expressions are displayed separately where helpful.")
         for i, step in enumerate(g.guided_steps, 1):
             if i <= reveal:
-                with st.container(border=True):
-                    st.markdown(f"**Step {i}**")
-                    render_mathio_mixed(step)
+                render_guidance_step(i, step)
 
         if reveal < len(g.guided_steps):
             if st.button(
@@ -2793,11 +2842,12 @@ def render_guided_solution(g: GuidedSolution) -> None:
 
     if reveal >= len(g.guided_steps) and g.guided_steps:
         with st.expander("Check the verified final answer", expanded=False):
-            render_mathio(g.final_answer_mathio)
+            render_mathio(clean_guidance_text(g.final_answer_mathio))
             if g.common_pitfalls:
-                st.markdown("**Common mistakes to avoid**")
+                st.markdown("#### Common mistakes to avoid")
                 for item in g.common_pitfalls:
-                    render_mathio_mixed(f"• {item}")
+                    guidance_item(item)
+
 
 
 def render_ai_analysis(a: GeminiAnalysis) -> None:

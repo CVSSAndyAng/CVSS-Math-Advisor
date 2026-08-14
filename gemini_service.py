@@ -1432,7 +1432,10 @@ ACCURACY
 MATH DISPLAY
 - Mathematics must be MathIO-ready raw LaTeX with NO $ delimiters.
 - Do not output Markdown math delimiters.
-- Ordinary explanations may be plain text.
+- Ordinary explanations MUST be normal readable prose, not LaTeX.
+- NEVER use \\textbullet, \\bullet, \\text{...}, or \\mathrm{...} to format prose or list items.
+- Do not wrap an entire explanatory sentence as a mathematical expression.
+- Each known_information, concept, hint and guided step should be a clean sentence; include LaTeX only for the actual mathematical symbols/equations.
 
 QUESTION:
 {question_text.strip() or '[Question supplied by attachment]'}
