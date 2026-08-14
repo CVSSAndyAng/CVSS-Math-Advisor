@@ -2755,6 +2755,20 @@ st.markdown("""<style>
 .omt-guidance-item p {
     margin: 0;
 }
+
+.compact-guided-title {
+    margin-bottom: 0.45rem !important;
+}
+div[data-testid="stVerticalBlock"] > div:has(.omt-guidance-item) {
+    gap: 0.15rem !important;
+}
+.omt-guidance-item {
+    margin: 0.08rem 0 0.18rem 0 !important;
+    line-height: 1.45 !important;
+}
+.omt-guidance-item p {
+    margin: 0 !important;
+}
 </style>""", unsafe_allow_html=True)
 
 def clean_guidance_text(value: str) -> str:
@@ -2791,8 +2805,9 @@ def render_guidance_step(step_number: int, value: str) -> None:
 
 def render_guided_solution(g: GuidedSolution) -> None:
     st.markdown('<div class="omt-section-kicker">Guided solving</div>', unsafe_allow_html=True)
-    st.markdown('<div class="omt-section-title">Work through the question</div>', unsafe_allow_html=True)
+    st.markdown('<div class="omt-section-title compact-guided-title">Work through the question</div>', unsafe_allow_html=True)
 
+    # Compact summary card: goal + givens + concepts without excessive vertical whitespace.
     with st.container(border=True):
         st.markdown("### 🎯 Goal")
         render_mathio_mixed(clean_guidance_text(g.interpreted_goal))
@@ -2803,51 +2818,91 @@ def render_guided_solution(g: GuidedSolution) -> None:
                 guidance_item(item)
 
         if g.concepts_to_use:
-            st.markdown("#### Useful concepts")
-            for item in g.concepts_to_use:
-                guidance_item(item)
+            with st.expander("Useful concepts", expanded=False):
+                for item in g.concepts_to_use:
+                    guidance_item(item)
 
-    with st.container(border=True):
-        st.markdown("### 🤔 Start here")
-        render_mathio_mixed(clean_guidance_text(g.first_question_for_student))
+    support_mode = st.radio(
+        "Choose how much help you want",
+        ["Hints only", "Full solution"],
+        horizontal=True,
+        key="guided_support_mode",
+        help=(
+            "Hints only reveals progressively stronger hints without showing the worked solution. "
+            "Full solution reveals the verified working step by step."
+        ),
+    )
 
-        hint_count = int(st.session_state.get("guided_hint_count", 0))
-        if hint_count < len(g.hint_ladder):
-            if st.button("Show next hint", key="guided_show_hint", use_container_width=True):
-                st.session_state.guided_hint_count = hint_count + 1
-                st.rerun()
+    if support_mode == "Hints only":
+        with st.container(border=True):
+            st.markdown("### 💡 Hints")
+            render_mathio_mixed(clean_guidance_text(g.first_question_for_student))
 
-        for i, hint in enumerate(g.hint_ladder[: int(st.session_state.get("guided_hint_count", 0))], 1):
-            with st.container(border=True):
+            hint_count = int(st.session_state.get("guided_hint_count", 0))
+            for i, hint in enumerate(g.hint_ladder[:hint_count], 1):
                 st.markdown(f"**Hint {i}**")
                 render_mathio_mixed(clean_guidance_text(hint))
 
-    reveal = int(st.session_state.get("guided_reveal_step", 0))
-    if g.guided_steps:
-        st.markdown("### Step-by-step guidance")
-        st.caption("Read the explanation first; mathematical expressions are displayed separately where helpful.")
-        for i, step in enumerate(g.guided_steps, 1):
-            if i <= reveal:
-                render_guidance_step(i, step)
+            if hint_count < len(g.hint_ladder):
+                if st.button(
+                    "Show next hint",
+                    key="guided_show_hint",
+                    use_container_width=True,
+                    type="primary" if hint_count == 0 else "secondary",
+                ):
+                    st.session_state.guided_hint_count = hint_count + 1
+                    st.rerun()
+            else:
+                st.success("All hints are shown. Try the question before revealing the full solution.")
 
-        if reveal < len(g.guided_steps):
             if st.button(
-                "Reveal next solution step",
-                key="guided_reveal_next",
-                type="primary" if reveal == 0 else "secondary",
+                "Switch to full solution",
+                key="guided_switch_full",
                 use_container_width=True,
             ):
-                st.session_state.guided_reveal_step = reveal + 1
+                st.session_state.guided_support_mode = "Full solution"
                 st.rerun()
 
-    if reveal >= len(g.guided_steps) and g.guided_steps:
-        with st.expander("Check the verified final answer", expanded=False):
-            render_mathio(clean_guidance_text(g.final_answer_mathio))
-            if g.common_pitfalls:
-                st.markdown("#### Common mistakes to avoid")
-                for item in g.common_pitfalls:
-                    guidance_item(item)
+    else:
+        reveal = int(st.session_state.get("guided_reveal_step", 0))
 
+        # Let the student decide whether to reveal one step at a time or everything.
+        c1, c2 = st.columns(2)
+        with c1:
+            if reveal < len(g.guided_steps):
+                if st.button(
+                    "Reveal next step",
+                    key="guided_reveal_next",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    st.session_state.guided_reveal_step = reveal + 1
+                    st.rerun()
+        with c2:
+            if reveal < len(g.guided_steps):
+                if st.button(
+                    "Show full solution",
+                    key="guided_reveal_all",
+                    use_container_width=True,
+                ):
+                    st.session_state.guided_reveal_step = len(g.guided_steps)
+                    st.rerun()
+
+        if g.guided_steps:
+            st.markdown("### Step-by-step solution")
+            for i, step in enumerate(g.guided_steps, 1):
+                if i <= reveal:
+                    render_guidance_step(i, step)
+
+        if reveal >= len(g.guided_steps) and g.guided_steps:
+            with st.container(border=True):
+                st.markdown("### ✅ Verified final answer")
+                render_mathio(clean_guidance_text(g.final_answer_mathio))
+
+                if g.common_pitfalls:
+                    with st.expander("Common mistakes to avoid", expanded=False):
+                        for item in g.common_pitfalls:
+                            guidance_item(item)
 
 
 def render_ai_analysis(a: GeminiAnalysis) -> None:
@@ -3356,6 +3411,7 @@ st.session_state.setdefault("ai_guided_solution", None)
 st.session_state.setdefault("ai_guided_error", "")
 st.session_state.setdefault("guided_hint_count", 0)
 st.session_state.setdefault("guided_reveal_step", 0)
+st.session_state.setdefault("guided_support_mode", "Hints only")
 
 # ---------- Gemini online analysis ----------
 with ai_tab:
@@ -3452,6 +3508,7 @@ with ai_tab:
         st.session_state.ai_guided_error = ""
         st.session_state.guided_hint_count = 0
         st.session_state.guided_reveal_step = 0
+        st.session_state.guided_support_mode = "Hints only"
         clear_ai_practice_state()
         st.session_state.pop("ai_detected_question_selector", None)
 
