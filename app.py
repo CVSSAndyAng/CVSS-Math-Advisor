@@ -2803,11 +2803,34 @@ def render_guidance_step(step_number: int, value: str) -> None:
         render_mathio_mixed(text)
 
 
+def _switch_guided_to_full() -> None:
+    """Widget callback: safe place to change the radio-controlled session key."""
+    st.session_state.guided_support_mode = "Full solution"
+
+
+def _switch_guided_to_hints() -> None:
+    """Widget callback: safe place to change the radio-controlled session key."""
+    st.session_state.guided_support_mode = "Hints only"
+
+
+def _show_all_guided_steps(total_steps: int) -> None:
+    st.session_state.guided_reveal_step = total_steps
+
+
+def _show_next_guided_step(total_steps: int) -> None:
+    current = int(st.session_state.get("guided_reveal_step", 0))
+    st.session_state.guided_reveal_step = min(current + 1, total_steps)
+
+
+def _show_next_guided_hint(total_hints: int) -> None:
+    current = int(st.session_state.get("guided_hint_count", 0))
+    st.session_state.guided_hint_count = min(current + 1, total_hints)
+
+
 def render_guided_solution(g: GuidedSolution) -> None:
     st.markdown('<div class="omt-section-kicker">Guided solving</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title compact-guided-title">Work through the question</div>', unsafe_allow_html=True)
 
-    # Compact summary card: goal + givens + concepts without excessive vertical whitespace.
     with st.container(border=True):
         st.markdown("### 🎯 Goal")
         render_mathio_mixed(clean_guidance_text(g.interpreted_goal))
@@ -2828,8 +2851,8 @@ def render_guided_solution(g: GuidedSolution) -> None:
         horizontal=True,
         key="guided_support_mode",
         help=(
-            "Hints only reveals progressively stronger hints without showing the worked solution. "
-            "Full solution reveals the verified working step by step."
+            "Hints only reveals progressively stronger hints without showing worked steps. "
+            "Full solution lets you reveal the verified working step by step or all at once."
         ),
     )
 
@@ -2840,61 +2863,78 @@ def render_guided_solution(g: GuidedSolution) -> None:
 
             hint_count = int(st.session_state.get("guided_hint_count", 0))
             for i, hint in enumerate(g.hint_ladder[:hint_count], 1):
-                st.markdown(f"**Hint {i}**")
-                render_mathio_mixed(clean_guidance_text(hint))
+                with st.container(border=True):
+                    st.markdown(f"**Hint {i}**")
+                    render_mathio_mixed(clean_guidance_text(hint))
 
             if hint_count < len(g.hint_ladder):
-                if st.button(
+                st.button(
                     "Show next hint",
                     key="guided_show_hint",
                     use_container_width=True,
                     type="primary" if hint_count == 0 else "secondary",
-                ):
-                    st.session_state.guided_hint_count = hint_count + 1
-                    st.rerun()
+                    on_click=_show_next_guided_hint,
+                    args=(len(g.hint_ladder),),
+                )
             else:
                 st.success("All hints are shown. Try the question before revealing the full solution.")
 
-            if st.button(
+            st.button(
                 "Switch to full solution",
                 key="guided_switch_full",
                 use_container_width=True,
-            ):
-                st.session_state.guided_support_mode = "Full solution"
-                st.rerun()
+                on_click=_switch_guided_to_full,
+            )
 
     else:
+        total_steps = len(g.guided_steps)
         reveal = int(st.session_state.get("guided_reveal_step", 0))
 
-        # Let the student decide whether to reveal one step at a time or everything.
-        c1, c2 = st.columns(2)
+        if total_steps == 0:
+            st.warning("No worked steps were returned for this guided solution. Regenerate the guided solution.")
+            return
+
+        # Make Full solution immediately useful: if the student has not revealed anything yet,
+        # show Step 1 automatically. This does not mutate a widget-controlled key.
+        if reveal == 0:
+            reveal = 1
+            st.session_state.guided_reveal_step = 1
+
+        st.markdown("### Step-by-step solution")
+
+        c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
-            if reveal < len(g.guided_steps):
-                if st.button(
+            st.button(
+                "← Hints",
+                key="guided_back_hints",
+                use_container_width=True,
+                on_click=_switch_guided_to_hints,
+            )
+        with c2:
+            if reveal < total_steps:
+                st.button(
                     "Reveal next step",
                     key="guided_reveal_next",
                     type="primary",
                     use_container_width=True,
-                ):
-                    st.session_state.guided_reveal_step = reveal + 1
-                    st.rerun()
-        with c2:
-            if reveal < len(g.guided_steps):
-                if st.button(
+                    on_click=_show_next_guided_step,
+                    args=(total_steps,),
+                )
+        with c3:
+            if reveal < total_steps:
+                st.button(
                     "Show full solution",
                     key="guided_reveal_all",
                     use_container_width=True,
-                ):
-                    st.session_state.guided_reveal_step = len(g.guided_steps)
-                    st.rerun()
+                    on_click=_show_all_guided_steps,
+                    args=(total_steps,),
+                )
 
-        if g.guided_steps:
-            st.markdown("### Step-by-step solution")
-            for i, step in enumerate(g.guided_steps, 1):
-                if i <= reveal:
-                    render_guidance_step(i, step)
+        for i, step in enumerate(g.guided_steps, 1):
+            if i <= reveal:
+                render_guidance_step(i, step)
 
-        if reveal >= len(g.guided_steps) and g.guided_steps:
+        if reveal >= total_steps:
             with st.container(border=True):
                 st.markdown("### ✅ Verified final answer")
                 render_mathio(clean_guidance_text(g.final_answer_mathio))
