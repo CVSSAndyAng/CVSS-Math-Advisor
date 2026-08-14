@@ -1417,7 +1417,7 @@ There is NO student solution to mark. Guide the student to solve the verified qu
 PEDAGOGY
 - Do not reveal the final answer immediately.
 - Begin with one short question that makes the student identify the relevant concept or first step.
-- Provide exactly three progressive hints.
+- Provide three progressive hints: Hint 1 should be conceptual, Hint 2 should identify the relationship/formula, and Hint 3 should help set up the first calculation without revealing the final answer.
 - Then provide a concise, correct sequence of guided steps that the app can reveal one at a time.
 - Use syllabus-appropriate methods and accept more than one valid method where appropriate.
 - Keep prose concise and student-friendly.
@@ -1469,11 +1469,44 @@ Return structured JSON only.
     except Exception as exc:
         raise _translate_exception(exc) from exc
 
-    if len(result.hint_ladder) != 3:
-        raise GeminiTutorError(
-            "Gemini did not return exactly three guided hints. Please try again.",
-            category="format",
+    # Be tolerant of model variation. The UI expects three progressive hints,
+    # but a useful guided solution should not fail merely because Gemini returned
+    # two or four hints.
+    cleaned_hints = [str(h).strip() for h in result.hint_ladder if str(h).strip()]
+    if len(cleaned_hints) >= 3:
+        result.hint_ladder = cleaned_hints[:3]
+    elif len(cleaned_hints) == 2:
+        # Use the first guided step as a stronger third hint without revealing
+        # the final answer. This preserves the progressive-hint experience.
+        stronger = (
+            f"Set up the first solution step using this idea: {result.guided_steps[0]}"
+            if result.guided_steps
+            else "Write the relevant formula or relationship, then substitute only the information given in the question."
         )
+        result.hint_ladder = [*cleaned_hints, stronger]
+    elif len(cleaned_hints) == 1:
+        middle = (
+            f"Identify the quantities needed for the first step: {result.guided_steps[0]}"
+            if result.guided_steps
+            else "Identify the relevant formula or relationship and match each known quantity to it."
+        )
+        stronger = (
+            f"Now set up the calculation for the first step: {result.guided_steps[0]}"
+            if result.guided_steps
+            else "Set up the first calculation carefully, but do not jump straight to the final answer."
+        )
+        result.hint_ladder = [cleaned_hints[0], middle, stronger]
+    else:
+        first_step = result.guided_steps[0] if result.guided_steps else ""
+        result.hint_ladder = [
+            "Identify what the question is asking you to find and list the information that is given.",
+            "Choose the mathematical relationship or formula that connects the known information to the unknown.",
+            (
+                f"Use this as the starting setup, then continue the calculation yourself: {first_step}"
+                if first_step
+                else "Write the first calculation using the relevant formula and the given values."
+            ),
+        ]
     return result
 
 
