@@ -3470,12 +3470,30 @@ with ai_tab:
         st.session_state.ai_visual_step = 0
         clear_ai_practice_state()
 
-    st.markdown("### Check the question before marking")
+    st.markdown("### Check the question before analysis")
     st.write(
-        "Before looking at the student's solution, Gemini checks whether the selected question is complete, internally consistent, "
-        "mathematically meaningful, and sufficiently clear to mark reliably."
+        "Gemini can first check whether the selected question is complete, internally consistent, "
+        "mathematically meaningful, and sufficiently clear before marking or guiding the student."
     )
-    if st.button("Check question feasibility", use_container_width=True):
+    bypass_feasibility = st.checkbox(
+        "Bypass question feasibility check",
+        key="ai_bypass_feasibility",
+        help=(
+            "Use this only when you already trust the question. Independent mathematical verification still runs "
+            "before the tutor marks or guides the solution."
+        ),
+    )
+    if bypass_feasibility:
+        st.warning(
+            "Question-feasibility screening is being bypassed. The tutor will still independently verify the mathematics, "
+            "but missing or contradictory information may only be discovered during verification."
+        )
+
+    if st.button(
+        "Check question feasibility",
+        use_container_width=True,
+        disabled=bypass_feasibility,
+    ):
         st.session_state.ai_question_feasibility = None
         st.session_state.ai_question_feasibility_error = ""
         st.session_state.ai_analysis = None
@@ -3517,19 +3535,35 @@ with ai_tab:
     if feasibility is not None:
         render_question_feasibility(feasibility, q_files)
 
-    feasibility_ready = bool(
+    feasibility_passed = bool(
         feasibility is not None
         and feasibility.can_analyse_student_work
         and st.session_state.ai_question_feasibility_signature == current_feasibility_signature
     )
-    if not feasibility_ready:
-        st.info("Student-working analysis remains locked until the current question passes the feasibility check.")
+    feasibility_ready = bool(bypass_feasibility or feasibility_passed)
 
-    primary_action_label = (
-        "Start guided solution"
-        if guided_mode
-        else "Analyse student working with Gemini"
+    # If the user chose the student-solution path but has not supplied any working,
+    # automatically treat the action as guided solving rather than failing with
+    # "Provide the student's working".
+    has_student_work = bool(
+        (w_text or "").strip()
+        or w_files
+        or (working_in_question_upload and q_files)
     )
+    effective_guided_mode = bool(guided_mode or not has_student_work)
+
+    if not feasibility_ready:
+        st.info(
+            "Run the question feasibility check, or select **Bypass question feasibility check**, "
+            "before continuing."
+        )
+    elif not guided_mode and not has_student_work:
+        st.info(
+            "No student working is currently supplied. Clicking the main button will **advise how to solve the question** "
+            "using guided hints and step-by-step support."
+        )
+
+    primary_action_label = "Analyse student working / Advise how to solve the question"
     if st.button(
         primary_action_label,
         type="primary",
@@ -3550,7 +3584,7 @@ with ai_tab:
         if not consent:
             st.error("Confirm the Gemini data-sharing acknowledgement before sending the question.")
         elif not feasibility_ready:
-            st.error("Run the question feasibility check and resolve any blocking question issue first.")
+            st.error("Run the question feasibility check or enable the bypass option before continuing.")
         else:
             try:
                 assets_q = uploaded_assets(q_files)
@@ -3571,7 +3605,7 @@ with ai_tab:
                     st.session_state.ai_cached_verification = verification
                     st.session_state.ai_cached_verification_signature = current_feasibility_signature
 
-                if guided_mode:
+                if effective_guided_mode:
                     with st.spinner("Preparing guided steps without revealing the answer immediately..."):
                         guided = generate_guided_solution(
                             track_label=track_label,
@@ -3628,7 +3662,7 @@ with ai_tab:
                 initialize_ai_practice(analysis)
                 st.rerun()
             except GeminiTutorError as exc:
-                if guided_mode:
+                if effective_guided_mode:
                     st.session_state.ai_guided_error = str(exc)
                 else:
                     st.session_state.ai_error = str(exc)
@@ -3649,7 +3683,7 @@ with ai_tab:
             st.info("Gemini was unavailable, so the tutor automatically used its deterministic offline algebra fallback for this typed submission.")
             render_attempt(st.session_state.ai_fallback_result)
         else:
-            st.info("Use **Offline practice** or **Offline algebra check** while Gemini is unavailable.")
+            st.info("If you intended to solve without student working, use **Advise how to solve the question**; offline practice and algebra check also remain available.")
 
     analysis: GeminiAnalysis | None = st.session_state.ai_analysis
     if analysis is not None:
