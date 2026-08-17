@@ -1929,25 +1929,110 @@ Return structured JSON only.
         })
         inputs.append(_encode_asset(asset))
 
-    try:
+    def _structured_request(prompt_text: str) -> PaperQuestionSolution:
         interaction = active_client.interactions.create(
             model=get_model(model),
             store=False,
-            input=inputs,
+            input=[
+                {"type": "text", "text": prompt_text},
+                *[
+                    item
+                    for i, asset in enumerate(question_assets, 1)
+                    for item in (
+                        {
+                            "type": "text",
+                            "text": f"Paper source {i}; focus on Question {detected_question.question_number}.",
+                        },
+                        _encode_asset(asset),
+                    )
+                ],
+            ],
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
                 "schema": PaperQuestionSolution.model_json_schema(),
             },
         )
-        result = PaperQuestionSolution.model_validate_json(interaction.output_text)
-    except ValidationError as exc:
-        raise GeminiTutorError(
-            f"Question {detected_question.question_number} solution returned an unexpected structure.",
-            category="format",
-        ) from exc
-    except Exception as exc:
-        raise _translate_exception(exc) from exc
+        return PaperQuestionSolution.model_validate_json(interaction.output_text)
+
+    try:
+        # First attempt: strict structured output.
+        result = _structured_request(prompt)
+    except Exception as first_exc:
+        try:
+            # Second attempt: simplify the request. This is intentionally shorter because
+            # large schemas + full exam-page images can occasionally cause malformed output.
+            retry_prompt = f"""
+Return a JSON worked solution for ONLY Question {detected_question.question_number}.
+
+QUESTION:
+{scoped_question_text}
+
+VERIFIED FACTS:
+{verification.model_dump_json(indent=2)}
+
+RULES:
+- Solve every subpart.
+- Use readable prose in explanation and MathIO-ready equations in equations.
+- Use the verified answer as authoritative.
+- Provide a concise suggested marking guide.
+- Printed marks if visible; otherwise suggested marks.
+- This is not an official SEAB/MOE mark scheme.
+- Return JSON matching the required schema only.
+""".strip()
+            result = _structured_request(retry_prompt)
+        except Exception as second_exc:
+            try:
+                # Third attempt: get plain JSON text without a response schema, then validate it.
+                fallback_prompt = f"""
+Create a concise full worked solution and suggested marking guide for ONLY
+Question {detected_question.question_number}.
+
+QUESTION:
+{scoped_question_text}
+
+INDEPENDENT VERIFICATION:
+{verification.model_dump_json(indent=2)}
+
+Return ONLY valid JSON with these exact top-level keys:
+question_number, topic, page_numbers, parts, total_marks, verification_note, confidence.
+
+Each item in parts must contain:
+label, question_text, marks_available, mark_source, worked_steps,
+final_answer_mathio, marking_points, common_errors.
+
+Each worked step must be:
+{{"explanation":"plain readable prose","equations":["MathIO equation"]}}
+
+Each marking point must be:
+{{"code":"M1/A1/B1/E1","marks":1,"description":"criterion","allow_follow_through":false}}
+
+No markdown fences. No commentary outside JSON.
+""".strip()
+                inputs: list[dict[str, str]] = [{"type": "text", "text": fallback_prompt}]
+                for i, asset in enumerate(question_assets, 1):
+                    inputs.append({
+                        "type": "text",
+                        "text": f"Paper source {i}; focus on Question {detected_question.question_number}.",
+                    })
+                    inputs.append(_encode_asset(asset))
+                plain = active_client.interactions.create(
+                    model=get_model(model),
+                    store=False,
+                    input=inputs,
+                )
+                raw = (plain.output_text or "").strip()
+                raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+                raw = re.sub(r"\s*```$", "", raw)
+                result = PaperQuestionSolution.model_validate_json(raw)
+            except Exception as third_exc:
+                # Preserve useful diagnostics instead of collapsing everything to
+                # "unexpected generation error".
+                raise GeminiTutorError(
+                    f"Question {detected_question.question_number} could not produce a valid structured solution after 3 attempts. "
+                    f"Last error type: {type(third_exc).__name__}.",
+                    category="format",
+                ) from third_exc
 
     if len(result.parts) == 1 and verification.verified_answer_mathio.strip():
         result.parts[0].final_answer_mathio = verification.verified_answer_mathio.strip()

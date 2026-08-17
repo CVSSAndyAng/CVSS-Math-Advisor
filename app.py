@@ -3900,11 +3900,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ai_tab, paper_tab, batch_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
+ai_tab, paper_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
     [
         "✨ Analyse",
         "📝 Full paper",
-        "👥 Class trends",
         "🧠 Offline practice",
         "✎ Algebra check",
         "📚 Syllabus",
@@ -3943,6 +3942,20 @@ with paper_tab:
         key="full_paper_upload",
         help="PDF and modern Word .docx files are supported. Legacy .doc files should be saved as .docx or PDF.",
     )
+    paper_generation_mode = st.radio(
+        "Full-paper generation mode",
+        ["Reliable", "Faster"],
+        horizontal=True,
+        key="paper_generation_mode",
+        help=(
+            "Reliable uses structured retries and independent verification for every question. "
+            "Faster reduces retry effort but may need more manual review."
+        ),
+    )
+    st.caption(
+        "Questions are solved one at a time. A failure on one question no longer stops or invalidates the rest of the paper."
+    )
+
     paper_title = st.text_input(
         "Paper title (optional)",
         key="full_paper_title",
@@ -4025,7 +4038,7 @@ with paper_tab:
                     for index, detected_question in enumerate(detection.questions, 1):
                         progress.progress(
                             (index - 1) / total_questions,
-                            text=f"Solving Question {detected_question.question_number} ({index}/{total_questions})...",
+                            text=f"Solving Question {detected_question.question_number} ({index}/{total_questions}) · {paper_generation_mode} mode...",
                         )
                         try:
                             scoped_assets = scoped_assets_for_paper_question(
@@ -4036,7 +4049,7 @@ with paper_tab:
                                 track_label=track_label,
                                 detected_question=detected_question,
                                 question_assets=scoped_assets,
-                                paper_text_context=paper_text,
+                                paper_text_context=paper_text[:12000],
                                 api_key=explicit_key,
                                 model=model,
                             )
@@ -4045,7 +4058,7 @@ with paper_tab:
                             errors.append(f"Question {detected_question.question_number}: {exc}")
                         except Exception as exc:
                             errors.append(
-                                f"Question {detected_question.question_number}: unexpected generation error."
+                                f"Question {detected_question.question_number}: {type(exc).__name__}: {str(exc)[:300]}"
                             )
 
                     progress.progress(1.0, text="Paper generation complete.")
@@ -4681,223 +4694,6 @@ with ai_tab:
 # ---------- Offline generated practice ----------
 
 # ---------- Batch / class trend analysis ----------
-with batch_tab:
-    st.markdown('<div class="omt-section-kicker">Class insight</div>', unsafe_allow_html=True)
-    st.markdown('<div class="omt-section-title">Analyse several student solutions to the same question</div>', unsafe_allow_html=True)
-    st.markdown(
-        "<div class='omt-section-copy'>The question is verified once, then each student's working is analysed separately. No visual simulation is generated in batch mode, which reduces API calls and improves speed.</div>",
-        unsafe_allow_html=True,
-    )
-
-    with st.container(border=True):
-        st.markdown("#### 1 · Shared question")
-        batch_q_text = st.text_area(
-            "Shared question text",
-            key="batch_question_text",
-            height=120,
-            placeholder="Type the common question, or upload it below.",
-        )
-        batch_q_files = st.file_uploader(
-            "Upload shared question image/PDF",
-            type=["png", "jpg", "jpeg", "webp", "pdf"],
-            accept_multiple_files=True,
-            key="batch_question_files",
-        )
-
-    with st.container(border=True):
-        st.markdown("#### 2 · Student solutions")
-        batch_solution_files = st.file_uploader(
-            "Upload several student solutions",
-            type=["png", "jpg", "jpeg", "webp", "pdf"],
-            accept_multiple_files=True,
-            key="batch_solution_files",
-            help="Each uploaded file is treated as one student's submission. A multi-page PDF can contain all pages for that student.",
-        )
-        batch_solution_contains_question = st.checkbox(
-            "Each student solution file also contains the printed question",
-            key="batch_solution_contains_question",
-            help="Useful for photographed worksheets where the question and the student's working are on the same page.",
-        )
-        show_batch_filenames = st.checkbox(
-            "Show uploaded filenames in results",
-            value=False,
-            key="batch_show_filenames",
-            help="Leave off when filenames contain student names. Results will use Student 01, Student 02, etc.",
-        )
-        batch_consent = st.checkbox(
-            "Allow Gemini to analyse these student submissions",
-            key="batch_gemini_consent",
-            help="Remove names, NRICs and other unnecessary identifiers before upload.",
-        )
-
-    if batch_solution_files and len(batch_solution_files) > 30:
-        st.warning("For reliability, analyse at most 30 student submissions at a time. Split larger classes into batches.")
-
-    if st.button(
-        "Analyse class batch",
-        type="primary",
-        use_container_width=True,
-        disabled=not bool(batch_solution_files),
-        key="batch_analyse_button",
-    ):
-        st.session_state.batch_results = []
-        st.session_state.batch_error = ""
-        if not batch_consent:
-            st.session_state.batch_error = "Confirm the Gemini data-sharing acknowledgement before batch analysis."
-        elif len(batch_solution_files or []) > 30:
-            st.session_state.batch_error = "Please limit each batch to 30 student submissions."
-        elif not batch_q_text.strip() and not batch_q_files and not batch_solution_contains_question:
-            st.session_state.batch_error = "Provide the shared question, or confirm that each student file contains the printed question."
-        else:
-            try:
-                # If the printed question is embedded in every student file and no separate
-                # question upload exists, use the first submission as the shared question source.
-                question_source_files = list(batch_q_files or [])
-                if not question_source_files and batch_solution_contains_question and batch_solution_files:
-                    question_source_files = [batch_solution_files[0]]
-                batch_assets_q = uploaded_assets(question_source_files)
-
-                with st.spinner("Checking the shared question once for the whole class..."):
-                    feasibility = assess_question_feasibility(
-                        track_label=track_label,
-                        question_text=batch_q_text,
-                        question_assets=batch_assets_q,
-                        api_key=explicit_key,
-                        model=model,
-                    )
-                    if not feasibility.can_analyse_student_work:
-                        raise GeminiTutorError(
-                            "The shared question needs clarification before class analysis: "
-                            + ("; ".join(feasibility.issues[0].description for _ in [0]) if feasibility.issues else feasibility.action_needed),
-                            category="input",
-                        )
-                    shared_verification = verify_question_math(
-                        track_label=track_label,
-                        question_text=batch_q_text,
-                        question_assets=batch_assets_q,
-                        api_key=explicit_key,
-                        model=model,
-                    )
-
-                progress = st.progress(0, text="Starting class analysis...")
-                results: list[dict[str, Any]] = []
-                total = len(batch_solution_files)
-                for idx, solution_file in enumerate(batch_solution_files, 1):
-                    student_label = solution_file.name if show_batch_filenames else f"Student {idx:02d}"
-                    progress.progress((idx - 1) / max(total, 1), text=f"Analysing {student_label} ({idx}/{total})...")
-                    try:
-                        solution_assets = uploaded_assets([solution_file])
-                        student_question_assets = batch_assets_q
-                        if batch_solution_contains_question:
-                            student_question_assets = solution_assets if not batch_q_files else batch_assets_q
-                        analysis = call_analyze_submission_compat(
-                            track_label=track_label,
-                            question_text=batch_q_text,
-                            working_text="[The student's solution is supplied in the uploaded file. Read all visible working and annotations conservatively.]",
-                            question_assets=student_question_assets,
-                            working_assets=solution_assets,
-                            offline_evidence="",
-                            api_key=explicit_key,
-                            model=model,
-                            verification=shared_verification,
-                        )
-                        issue_types = [
-                            str(step.issue_type).strip().lower()
-                            for step in analysis.steps
-                            if str(step.issue_type).strip().lower() not in {"", "none", "no issue"}
-                        ]
-                        presentation_count = sum(1 for step in analysis.steps if getattr(step, "presentation_error", False))
-                        results.append({
-                            "student": student_label,
-                            "status": "Analysed",
-                            "judgement": analysis.overall_judgement.replace("_", " ").title(),
-                            "first_logic_break_step": analysis.first_logic_break_step,
-                            "misconception": analysis.misconception_or_gap,
-                            "issue_types": issue_types,
-                            "presentation_errors": presentation_count,
-                            "analysis": analysis,
-                        })
-                    except Exception as exc:
-                        results.append({
-                            "student": student_label,
-                            "status": "Could not analyse",
-                            "judgement": "—",
-                            "first_logic_break_step": 0,
-                            "misconception": str(exc),
-                            "issue_types": [],
-                            "presentation_errors": 0,
-                            "analysis": None,
-                        })
-                progress.progress(1.0, text="Class analysis complete.")
-                st.session_state.batch_results = results
-                st.rerun()
-            except GeminiTutorError as exc:
-                st.session_state.batch_error = str(exc)
-                st.rerun()
-
-    if st.session_state.batch_error:
-        st.error(st.session_state.batch_error)
-
-    batch_results = list(st.session_state.get("batch_results", []) or [])
-    if batch_results:
-        successful = [item for item in batch_results if item.get("analysis") is not None]
-        st.markdown("### Class trend overview")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Submissions", len(batch_results))
-        c2.metric("Analysed", len(successful))
-        with_logic_break = sum(1 for item in successful if int(item.get("first_logic_break_step", 0) or 0) > 0)
-        c3.metric("With a logic break", with_logic_break)
-
-        issue_counter = Counter()
-        judgement_counter = Counter()
-        break_counter = Counter()
-        for item in successful:
-            judgement_counter[item["judgement"]] += 1
-            for issue in item.get("issue_types", []):
-                issue_counter[issue] += 1
-            step_no = int(item.get("first_logic_break_step", 0) or 0)
-            if step_no > 0:
-                break_counter[f"Step {step_no}"] += 1
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("#### Common issue categories")
-            if issue_counter:
-                issue_df = pd.DataFrame(
-                    [{"Issue": k.title(), "Students": v} for k, v in issue_counter.most_common(10)]
-                ).set_index("Issue")
-                st.bar_chart(issue_df)
-            else:
-                st.success("No recurring issue category was identified in the analysed submissions.")
-        with col_b:
-            st.markdown("#### First logic-break location")
-            if break_counter:
-                break_df = pd.DataFrame(
-                    [{"Step": k, "Students": v} for k, v in sorted(break_counter.items())]
-                ).set_index("Step")
-                st.bar_chart(break_df)
-            else:
-                st.success("No material logic break was identified in the analysed submissions.")
-
-        summary_rows = []
-        for item in batch_results:
-            summary_rows.append({
-                "Student": item["student"],
-                "Status": item["status"],
-                "Judgement": item["judgement"],
-                "First logic break": item["first_logic_break_step"] or "—",
-                "Presentation errors": item["presentation_errors"],
-                "Main misconception / gap": item["misconception"],
-            })
-        st.markdown("#### Student-by-student summary")
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-
-        with st.expander("Review individual analyses", expanded=False):
-            for item in successful:
-                with st.expander(item["student"], expanded=False):
-                    render_ai_analysis(item["analysis"])
-
-
 with practice_tab:
     st.subheader("No-credit syllabus-generated practice")
     st.caption("This tab never calls Gemini. It keeps working even if the API key is missing or a free-tier quota is reached.")
