@@ -921,29 +921,35 @@ def verify_question_math(
     model: str | None = None,
     client=None,
 ) -> MathVerificationResult:
-    """Independent verification pass before marking student work.
+    """Independent verification pass before marking or guided solving.
 
-    Uses Gemini's built-in Python code execution for calculable claims. For shaded-area
-    geometry, the boundary trace is mandatory before any area equation is accepted.
+    The topology variable is initialized for every code path before any prompt
+    interpolation. This verifier is shared by Analyse, guided solving and full-paper
+    generation.
     """
     question_assets = question_assets or []
     if not question_text.strip() and not question_assets:
         raise GeminiTutorError("Provide the question before verification.", category="input")
 
-    # IMPORTANT: initialize the client/topology BEFORE building any f-string prompt
-    # that references topology. This guarantees topology is defined for every path,
-    # including non-geometry questions and full-paper generation.
     active_client = client or _make_client(api_key)
+
+    # Always define topology first. Never allow prompt construction to reference an
+    # uninitialized local variable.
     topology: DiagramTopologyResult | None = None
 
     topology_keywords = re.compile(
-        r"\b(shaded|semicircle|circle|arc|sector|composite|region|perimeter|area|diagram)\b",
+        r"\b(shaded|semicircle|circle|arc|sector|composite|region|perimeter|area|diagram|geometry|graph|coordinate)\b",
         re.IGNORECASE,
     )
-    if question_assets and (
-        not (question_text or "").strip()
-        or topology_keywords.search(question_text or "")
-    ):
+    should_check_topology = bool(
+        question_assets
+        and (
+            not (question_text or "").strip()
+            or topology_keywords.search(question_text or "")
+        )
+    )
+
+    if should_check_topology:
         try:
             topology = _extract_geometry_topology(
                 active_client=active_client,
@@ -953,8 +959,8 @@ def verify_question_math(
                 model=model,
             )
         except Exception:
-            # Topology extraction is an accuracy aid. A failure here must not create
-            # an UnboundLocalError or crash ordinary non-geometry verification.
+            # Topology is an accuracy layer. If extraction itself fails, keep None and
+            # let the verifier decide whether the underlying question remains answerable.
             topology = None
 
     prompt = f"""
