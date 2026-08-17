@@ -3359,16 +3359,28 @@ def extract_docx_exam(file_obj: Any) -> tuple[str, list[UploadedAsset]]:
 
     document = Document(BytesIO(data))
     chunks: list[str] = []
-    for paragraph in document.paragraphs:
-        text = paragraph.text.strip()
-        if text:
-            chunks.append(text)
-
-    for table_index, table in enumerate(document.tables, 1):
-        chunks.append(f"[Table {table_index}]")
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells]
-            chunks.append(" | ".join(cells))
+    table_index = 0
+    for child in document.element.body.iterchildren():
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            texts = [node.text for node in child.iter() if node.tag.rsplit("}", 1)[-1] == "t" and node.text]
+            text = "".join(texts).strip()
+            if text:
+                chunks.append(text)
+        elif tag == "tbl":
+            table_index += 1
+            chunks.append(f"[Table {table_index}]")
+            for tr in child.iter():
+                if tr.tag.rsplit("}", 1)[-1] != "tr":
+                    continue
+                cells = []
+                for tc in tr:
+                    if tc.tag.rsplit("}", 1)[-1] != "tc":
+                        continue
+                    texts = [node.text for node in tc.iter() if node.tag.rsplit("}", 1)[-1] == "t" and node.text]
+                    cells.append("".join(texts).strip())
+                if cells:
+                    chunks.append(" | ".join(cells))
 
     assets: list[UploadedAsset] = []
     try:
@@ -3451,18 +3463,26 @@ def scope_pdf_asset_to_pages(asset: UploadedAsset, pages: list[int]) -> Uploaded
         return asset
 
 
-def paper_question_text_context(detected_question: Any, paper_text: str) -> str:
+def paper_question_text_context(detected_question: Any, paper_text: str, next_question_number: str | None = None) -> str:
     pieces=[f"Question {detected_question.question_number}", detected_question.question_text or ""]
     if detected_question.subparts:
-        pieces.append("Subparts:")
+        pieces.append("Detected subparts:")
         pieces.extend(f"{p.label}: {p.question_text}" for p in detected_question.subparts)
     if paper_text:
         qn=re.escape(str(detected_question.question_number))
-        hits=[re.search(rf"(?im)^\s*{qn}\s*[\.\)]",paper_text),
-              re.search(rf"(?im)^\s*Question\s+{qn}\b",paper_text)]
-        hit=next((m for m in hits if m),None); pos=hit.start() if hit else 0
-        pieces+=["Extracted paper context:",paper_text[pos:pos+9000]]
+        hits=[re.search(rf"(?im)^\s*Question\s+{qn}\b",paper_text),
+              re.search(rf"(?im)^\s*{qn}\s*[\.\)]\s+",paper_text)]
+        hit=next((m for m in hits if m),None); start=hit.start() if hit else 0
+        finish=min(len(paper_text),start+18000)
+        if next_question_number:
+            nn=re.escape(str(next_question_number))
+            nhits=[re.search(rf"(?im)^\s*Question\s+{nn}\b",paper_text[start+1:]),
+                   re.search(rf"(?im)^\s*{nn}\s*[\.\)]\s+",paper_text[start+1:])]
+            nh=next((m for m in nhits if m),None)
+            if nh: finish=start+1+nh.start()
+        pieces+=["AUTHORITATIVE EXTRACTED QUESTION BLOCK:",paper_text[start:finish]]
     return "\n".join(x for x in pieces if x).strip()
+
 
 
 def scoped_assets_for_paper_question(
@@ -4124,7 +4144,10 @@ with paper_tab:
                             text=f"Solving Question {detected_question.question_number} ({index}/{total_questions}) · {paper_generation_mode} mode...",
                         )
                         try:
-                            focused_paper_text = paper_question_text_context(detected_question, paper_text)
+                            next_question_number = detection.questions[index].question_number if index < len(detection.questions) else None
+                            focused_paper_text = paper_question_text_context(
+                                detected_question, paper_text, next_question_number
+                            )
                             scoped_assets = scoped_assets_for_paper_question(
                                 paper_assets,
                                 detected_question.page_numbers,
@@ -4135,7 +4158,7 @@ with paper_tab:
                                     or re.search(r"\b(diagram|figure|graph|table|chart|grid|shape|circle|triangle|angle)\b",
                                                  detected_question.question_text or "", re.IGNORECASE)
                                 )
-                                scoped_assets = scoped_assets[:3] if needs_visual else []
+                                scoped_assets = scoped_assets[:8] if needs_visual else []
                             solution = generate_paper_question_solution(
                                 track_label=track_label,
                                 detected_question=detected_question,
@@ -4148,7 +4171,7 @@ with paper_tab:
                         except GeminiTutorError as exc:
                             errors.append(f"Question {detected_question.question_number}: {exc}")
                             message = str(exc).lower()
-                            if "quota" in message or "rate limit" in message or "free-tier" in message:
+                            if "quota" in message or "rate limit" in message or "ratelimit" in message or "free-tier" in message:
                                 errors.append("Generation stopped because the Gemini quota/rate limit was reached. Completed questions are preserved; continue later.")
                                 break
                         except Exception as exc:

@@ -973,6 +973,9 @@ ACCURACY PROTOCOL
 3. Independently check equations, roots, fractions, indices, trigonometric values, coordinates, matrices, statistics and generated numeric answers.
 4. Do not force Python for a purely conceptual statement when there is nothing useful to calculate.
 5. If the diagram, labels, wording, domain or givens are unclear, report uncertainty instead of guessing.
+6. When an AUTHORITATIVE EXTRACTED QUESTION BLOCK is supplied, search it before claiming that numbers, expressions, tables, sequences or values are missing.
+7. If multiple embedded Word images are attached, ignore images whose labels/content do not clearly match the current question.
+
 6. When question_text says the transcription may be incomplete and attachments are present, RE-READ the attached page/image and use it as the authoritative source. Do not mark the question incomplete just because a detector summary omitted numbers, equations, tables, or diagrams.
 
 MANDATORY GEOMETRY BOUNDARY PROTOCOL
@@ -1879,8 +1882,10 @@ def generate_paper_question_solution(
             f"Source pages: {', '.join(map(str, detected_question.page_numbers))}\n"
             if detected_question.page_numbers else ""
         )
-        + "IMPORTANT: Use the focused extracted paper context below together with any attachment as authoritative. "
-          "Do not declare the question incomplete merely because the detector summary omitted data.\n"
+        + "IMPORTANT: For Word papers, the AUTHORITATIVE EXTRACTED QUESTION BLOCK below is the primary source. "
+          "The detector transcription may omit numbers, expressions, tables or values. Search the authoritative block "
+          "before declaring information missing. Attachments are supplementary and must only be used when their labels "
+          "clearly match the current question.\n"
         + "FOCUSED EXTRACTED PAPER CONTEXT:\n"
         + (paper_text_context[:12000] if paper_text_context.strip() else "[No extracted text available]")
     )
