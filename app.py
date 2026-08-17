@@ -2940,6 +2940,71 @@ def _looks_like_standalone_math(text: str) -> bool:
     return math_signals >= 1 and len(words) <= 4
 
 
+
+_INLINE_MATH_FRAGMENT_RE = re.compile(
+    r"""
+    (?:
+        [A-Za-z][A-Za-z0-9_]*\s*=\s*[^,.;:]+
+        |
+        \([^()\n]{1,80}\)\^\{?\d+\}?
+        |
+        \([^()\n]{1,80}\)\^\d+
+        |
+        [A-Za-z0-9]+\^\{?\d+\}?
+        |
+        \\(?:frac|sqrt|pi|theta|sin|cos|tan|log|ln)\b[^,.;:]*
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+def render_guidance_mixed_mathio(value: str) -> None:
+    """Render prose normally and actual inline mathematics with MathIO.
+
+    This is used for Goal / hints / prose-heavy guidance. It avoids sending the
+    whole English sentence to MathIO while still rendering expressions such as
+    (1+y)^7, x^7 and (1+x+x^2)^7 properly.
+    """
+    text = clean_guidance_text(value)
+    if not text:
+        return
+
+    # Remove ellipsis LaTeX commands; they are presentation shorthand and should not
+    # appear in the student's worked solution.
+    text = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", text)
+    text = re.sub(r"\.{3,}", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+
+    if _looks_like_standalone_math(text):
+        render_mathio(text)
+        return
+
+    parts = []
+    cursor = 0
+    for match in _INLINE_MATH_FRAGMENT_RE.finditer(text):
+        if match.start() > cursor:
+            parts.append(("text", text[cursor:match.start()]))
+        parts.append(("math", match.group(0).strip()))
+        cursor = match.end()
+    if cursor < len(text):
+        parts.append(("text", text[cursor:]))
+
+    if not any(kind == "math" for kind, _ in parts):
+        st.markdown(_plainify_embedded_math(text))
+        return
+
+    # Render in a compact flow. MathIO equations get their own line for reliability.
+    for kind, chunk in parts:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if kind == "math":
+            render_mathio(chunk)
+        else:
+            st.markdown(chunk)
+
+
 def render_guidance_content(value: str) -> None:
     """Render guidance as readable prose, using MathIO only for real equations."""
     text = clean_guidance_text(value)
@@ -2990,7 +3055,11 @@ def render_guidance_step(step_number: int, value) -> None:
         if explanation:
             st.markdown(explanation)
         for equation in equations:
-            render_mathio(equation)
+            equation = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", equation)
+            equation = re.sub(r"\.{3,}", "", equation)
+            equation = re.sub(r"\s{2,}", " ", equation).strip()
+            if equation:
+                render_mathio(equation)
 
 
 def _switch_guided_to_full() -> None:
@@ -3023,7 +3092,7 @@ def render_guided_solution(g: GuidedSolution) -> None:
 
     with st.container(border=True):
         st.markdown("### 🎯 Goal")
-        render_guidance_content(g.interpreted_goal)
+        render_guidance_mixed_mathio(g.interpreted_goal)
 
         known_items = [clean_guidance_text(item) for item in g.known_information]
         known_items = [item for item in known_items if item]

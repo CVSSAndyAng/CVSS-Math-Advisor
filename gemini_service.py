@@ -973,6 +973,7 @@ ACCURACY PROTOCOL
 3. Independently check equations, roots, fractions, indices, trigonometric values, coordinates, matrices, statistics and generated numeric answers.
 4. Do not force Python for a purely conceptual statement when there is nothing useful to calculate.
 5. If the diagram, labels, wording, domain or givens are unclear, report uncertainty instead of guessing.
+6. When question_text says the transcription may be incomplete and attachments are present, RE-READ the attached page/image and use it as the authoritative source. Do not mark the question incomplete just because a detector summary omitted numbers, equations, tables, or diagrams.
 
 MANDATORY GEOMETRY BOUNDARY PROTOCOL
 - If this is a shaded-region AREA question, set problem_type="shaded_area".
@@ -1872,13 +1873,15 @@ def generate_paper_question_solution(
     )
     scoped_question_text = (
         f"Question {detected_question.question_number}\n"
-        f"{detected_question.question_text}\n"
-        + (f"Subparts:\n{subpart_lines}\n" if subpart_lines else "")
+        f"Detector transcription (may be incomplete): {detected_question.question_text}\n"
+        + (f"Detected subparts (may be incomplete):\n{subpart_lines}\n" if subpart_lines else "")
         + (
-            f"Pages: {', '.join(map(str, detected_question.page_numbers))}\n"
+            f"Source pages: {', '.join(map(str, detected_question.page_numbers))}\n"
             if detected_question.page_numbers else ""
         )
-        + "IMPORTANT: Solve ONLY this detected question from the supplied paper. Ignore other questions."
+        + "IMPORTANT: The attached scoped page/image is authoritative. Re-read the actual printed question, "
+          "numbers, tables, equations and diagrams from the attachment before verifying or solving. "
+          "Do not declare the question incomplete merely because the detector transcription omitted data."
     )
 
     verification = verify_question_math(
@@ -2096,7 +2099,8 @@ REQUIREMENTS
 
 
 GUIDANCE DISPLAY CONTRACT
-- Never emit \textbullet or \bullet.
+- Never emit \\textbullet or \\bullet.
+- Never emit \\dots, \\ldots, \\cdots, or '...'. Expand only the terms actually needed for the reasoning.
 - Do not put bullet symbols inside field values; the UI creates bullets itself.
 - Write explanatory language as ordinary English prose.
 - Never wrap an entire sentence in LaTeX or MathIO syntax.
@@ -2107,7 +2111,8 @@ GUIDANCE DISPLAY CONTRACT
 
 
 GUIDANCE DISPLAY CONTRACT
-- Never emit \textbullet or \bullet.
+- Never emit \\textbullet or \\bullet.
+- Never emit \\dots, \\ldots, \\cdots, or '...'. Expand only the terms actually needed for the reasoning.
 - Do not put bullet symbols inside field values; the UI creates bullets itself.
 - Write explanatory language as ordinary English prose.
 - Never wrap an entire sentence in LaTeX or MathIO syntax.
@@ -2308,6 +2313,8 @@ Return structured JSON only.
     def _clean_model_guidance(value: str) -> str:
         cleaned = str(value or "").strip()
         cleaned = re.sub(r"\\+(?:textbullet|bullet)\b\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\.{3,}", "", cleaned)
         cleaned = re.sub(r"^\s*[•●▪◦*-]+\s*", "", cleaned)
         return re.sub(r"\s{2,}", " ", cleaned).strip()
 
@@ -2322,7 +2329,14 @@ Return structured JSON only.
     cleaned_steps: list[GuidedStep] = []
     for step in result.guided_steps:
         explanation = _clean_model_guidance(step.explanation)
-        equations = [str(eq).strip() for eq in step.equations if str(eq).strip()]
+        equations = []
+        for eq in step.equations:
+            cleaned_eq = str(eq).strip()
+            cleaned_eq = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", cleaned_eq, flags=re.IGNORECASE)
+            cleaned_eq = re.sub(r"\.{3,}", "", cleaned_eq)
+            cleaned_eq = re.sub(r"\s{2,}", " ", cleaned_eq).strip()
+            if cleaned_eq:
+                equations.append(cleaned_eq)
         if explanation or equations:
             cleaned_steps.append(GuidedStep(explanation=explanation, equations=equations))
     result.guided_steps = cleaned_steps
