@@ -55,7 +55,7 @@ class DetectedQuestion(BaseModel):
     page_numbers: list[int] = Field(default_factory=list, description="1-based PDF page numbers or uploaded-file order")
     has_diagram_or_table: bool = Field(
         default=False,
-        description="True when the question depends on a diagram, graph, table, chart, grid, or other visual source."
+        description="True when solving depends on a diagram, graph, table, chart, grid, or figure"
     )
     confidence: Literal["high", "medium", "low"]
 
@@ -1426,7 +1426,7 @@ TRANSCRIPTION RULES
 - page_numbers are 1-based PDF page numbers where visible; for separate uploaded images, use their 1-based upload order.
 - topic_hint should be short, for example Algebra, Coordinate geometry, Trigonometry, Statistics, or Probability.
 - Add a note when a diagram/table is essential but cannot be fully represented in the transcription.
-- Set has_diagram_or_table=true whenever solving the question depends on a diagram, graph, table, chart, grid, or figure.
+- Set has_diagram_or_table=true whenever solving depends on a diagram, graph, table, chart, grid, or figure. Otherwise set it false.
 
 EXTRACTED WORD/PAPER TEXT (when supplied):
 {paper_text[:120000] if paper_text.strip() else '[No separately extracted text]'}
