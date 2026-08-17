@@ -4370,6 +4370,7 @@ with setter_tab:
 
 # ---------- Full paper worked solutions ----------
 with paper_tab:
+    st.caption("Build 2026-08-17 · full-paper visual detection safe")
     st.markdown('<div class="omt-section-kicker">Teacher / revision workflow</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Full paper worked solutions + marking guide</div>', unsafe_allow_html=True)
     st.write(
@@ -4409,7 +4410,7 @@ with paper_tab:
     )
 
     if paper_file is not None:
-        signature = f"{paper_file.name}:{getattr(paper_file, 'size', 0)}"
+        signature = f"visual-safe-v2:{paper_file.name}:{getattr(paper_file, 'size', 0)}"
         if st.session_state.paper_signature != signature:
             st.session_state.paper_signature = signature
             st.session_state.paper_detection = None
@@ -4496,10 +4497,21 @@ with paper_tab:
                                 detected_question.page_numbers,
                             )
                             if str(getattr(paper_file, "name", "")).lower().endswith(".docx"):
+                                question_visual_text = " ".join(
+                                    [
+                                        detected_question.question_text or "",
+                                        *[
+                                            getattr(part, "question_text", "") or ""
+                                            for part in (getattr(detected_question, "subparts", []) or [])
+                                        ],
+                                    ]
+                                )
                                 needs_visual = bool(
-                                    getattr(detected_question, "has_diagram_or_table", False)
-                                    or re.search(r"\b(diagram|figure|graph|table|chart|grid|shape|circle|triangle|angle)\b",
-                                                 detected_question.question_text or "", re.IGNORECASE)
+                                    re.search(
+                                        r"\b(diagram|figure|graph|table|chart|grid|shape|circle|semicircle|triangle|angle|coordinates?|plot|draw|sketch|construction|map|pie chart|histogram)\b",
+                                        question_visual_text,
+                                        re.IGNORECASE,
+                                    )
                                 )
                                 scoped_assets = scoped_assets[:8] if needs_visual else []
                             solution = generate_paper_question_solution(
