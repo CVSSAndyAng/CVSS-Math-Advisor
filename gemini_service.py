@@ -1959,8 +1959,13 @@ NON-NEGOTIABLE PAPER-SETTER RULES
    calculation are compared with a threshold, they must fall on different sides of that threshold.
 8. Use fresh, clean numbers and solve EVERY question yourself before returning it.
 9. Every part must be answerable from the information provided.
-10. Mathematics in prompt_text/stem_text must be prose only. Put mathematical expressions in the
-    equations arrays so the Word exporter can create native equation objects.
+10. ALL mathematical notation must be separated from prose wherever possible.
+    - stem_text and prompt_text contain ordinary language only.
+    - Put formulas, equations, expressions, coordinates, powers, roots, fractions, inequalities,
+      function definitions, units attached to symbolic quantities, and symbolic answers in the equations arrays.
+    - final_answer_mathio contains the symbolic final answer.
+    - Do not place raw LaTeX commands inside prose fields.
+    This is required so the web app renders mathematics with MathIO and Word exports create native editable equations.
 11. {scheme_rule}
 12. Marking points are a suggested Cambridge-style teacher scheme: M1 method, A1 accuracy,
     B1 independent result/fact, E1 explanation. Partial-mark points for each part must sum to

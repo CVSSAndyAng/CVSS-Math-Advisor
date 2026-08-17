@@ -3734,48 +3734,236 @@ def _omml_run(text: str):
 
 
 def _latex_display_text(value: str) -> str:
-    """Conservative conversion for Word equation zones; keeps meaning readable."""
+    """Normalize MathIO/LaTeX source before conversion to native Word equations."""
     text = str(value or "").strip()
+    text = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", text)
+    text = re.sub(r"\\(?:left|right)", "", text)
     replacements = {
-        r"\\times": "×", r"\\div": "÷", r"\\pi": "π", r"\\theta": "θ",
-        r"\\leq": "≤", r"\\le": "≤", r"\\geq": "≥", r"\\ge": "≥",
-        r"\\neq": "≠", r"\\pm": "±", r"\\circ": "°", r"\\cdot": "·",
+        r"\times": "×", r"\div": "÷", r"\pi": "π", r"\theta": "θ",
+        r"\alpha": "α", r"\beta": "β", r"\gamma": "γ", r"\delta": "δ",
+        r"\leq": "≤", r"\le": "≤", r"\geq": "≥", r"\ge": "≥",
+        r"\neq": "≠", r"\pm": "±", r"\circ": "°", r"\cdot": "·",
+        r"\infty": "∞", r"\approx": "≈", r"\therefore": "∴",
     }
     for src, dst in replacements.items():
         text = text.replace(src, dst)
-    text = re.sub(r"\\(?:left|right)", "", text)
-    text = re.sub(r"\\text\{([^{}]*)\}", r"\1", text)
-    return text
+    text = re.sub(r"\\(?:text|mathrm|mathbf|operatorname)\{([^{}]*)\}", r"\1", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def _balanced_group(src: str, start: int) -> tuple[str, int] | None:
+    """Read a {...} group starting at start. Returns (inside, next_index)."""
+    if start >= len(src) or src[start] != "{":
+        return None
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start + 1:i], i + 1
+    return None
+
+
+def _append_omml_expression(parent, source: str) -> None:
+    """Append common school mathematics as structured, editable OMML.
+
+    Supports nested fractions, roots, superscripts/subscripts and ordinary symbols.
+    Unknown constructs remain editable Word-math text rather than raw body text.
+    """
+    src = _latex_display_text(source)
+    i = 0
+    plain = []
+
+    def flush_plain():
+        if plain:
+            parent.append(_omml_run("".join(plain)))
+            plain.clear()
+
+    while i < len(src):
+        if src.startswith(r"\frac", i):
+            g1 = _balanced_group(src, i + 5)
+            if g1:
+                g2 = _balanced_group(src, g1[1])
+                if g2:
+                    flush_plain()
+                    frac = OxmlElement("m:f")
+                    num = OxmlElement("m:num")
+                    den = OxmlElement("m:den")
+                    _append_omml_expression(num, g1[0])
+                    _append_omml_expression(den, g2[0])
+                    frac.extend([num, den])
+                    parent.append(frac)
+                    i = g2[1]
+                    continue
+
+        if src.startswith(r"\sqrt", i):
+            g = _balanced_group(src, i + 5)
+            if g:
+                flush_plain()
+                rad = OxmlElement("m:rad")
+                rad_pr = OxmlElement("m:radPr")
+                deg_hide = OxmlElement("m:degHide")
+                deg_hide.set(qn("m:val"), "1")
+                rad_pr.append(deg_hide)
+                deg = OxmlElement("m:deg")
+                elem = OxmlElement("m:e")
+                _append_omml_expression(elem, g[0])
+                rad.extend([rad_pr, deg, elem])
+                parent.append(rad)
+                i = g[1]
+                continue
+
+        # Superscript or subscript applying to the immediately preceding textual base.
+        if src[i] in "^_" and i + 1 < len(src):
+            op = src[i]
+            if src[i + 1] == "{":
+                g = _balanced_group(src, i + 1)
+                if g:
+                    exponent, next_i = g
+                else:
+                    exponent, next_i = src[i + 1], i + 2
+            else:
+                exponent, next_i = src[i + 1], i + 2
+
+            if plain:
+                base_char = plain.pop()
+                flush_plain()
+                node = OxmlElement("m:sSup" if op == "^" else "m:sSub")
+                base = OxmlElement("m:e"); base.append(_omml_run(base_char))
+                script = OxmlElement("m:sup" if op == "^" else "m:sub")
+                _append_omml_expression(script, exponent)
+                node.extend([base, script])
+                parent.append(node)
+                i = next_i
+                continue
+
+        # Common functions are retained as native math text inside the OMML zone.
+        command_match = re.match(r"\\(sin|cos|tan|log|ln)\\?", src[i:])
+        if command_match:
+            plain.append(command_match.group(1))
+            i += command_match.end()
+            continue
+
+        # Strip a remaining command slash while keeping the command name editable.
+        if src[i] == "\\":
+            command = re.match(r"\\([A-Za-z]+)", src[i:])
+            if command:
+                plain.append(command.group(1))
+                i += command.end()
+                continue
+
+        plain.append(src[i])
+        i += 1
+
+    flush_plain()
 
 
 def append_word_math(paragraph, latex: str) -> None:
-    """Insert a native OMML math zone. Fractions/radicals are structurally represented when simple."""
-    src = _latex_display_text(latex)
-    math_para = OxmlElement("m:oMathPara")
+    """Insert a native editable Word equation (OMML) into an existing paragraph."""
+    source = str(latex or "").strip()
+    if not source:
+        return
     math = OxmlElement("m:oMath")
+    _append_omml_expression(math, source)
+    paragraph._p.append(math)
 
-    # Simple whole-expression fraction.
-    m = re.fullmatch(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", src)
-    if m:
-        frac = OxmlElement("m:f")
-        num = OxmlElement("m:num"); num.append(_omml_run(m.group(1)))
-        den = OxmlElement("m:den"); den.append(_omml_run(m.group(2)))
-        frac.extend([num, den]); math.append(frac)
-    else:
-        # Simple square-root whole expression.
-        m = re.fullmatch(r"\\sqrt\{([^{}]+)\}", src)
-        if m:
-            rad = OxmlElement("m:rad")
-            deg = OxmlElement("m:deg")
-            elem = OxmlElement("m:e"); elem.append(_omml_run(m.group(1)))
-            rad.extend([deg, elem]); math.append(rad)
+
+_WORD_MATH_FRAGMENT_RE = re.compile(
+    r"""
+    (?:
+        (?<!\w)[A-Za-z]\s*=\s*\\frac\{[^{}]+\}\{[^{}]+\}
+        |
+        (?<!\w)[A-Za-z]\s*=\s*\\sqrt\{[^{}]+\}
+        |
+        \\frac\{[^{}]+\}\{[^{}]+\}
+        |
+        \\sqrt\{[^{}]+\}
+        |
+        \\(?:pi|theta|alpha|beta|gamma|delta)\b
+        |
+        \\(?:sin|cos|tan|log|ln)\b(?:\s*\([^)]*\)|\s*\{[^{}]*\})?
+        |
+        (?<!\w)(?:\d+(?:\.\d+)?\s*)?[A-Za-z](?:\^\{?[-+]?\d+\}?|_\{?[A-Za-z0-9]+\}?)?
+        (?:\s*[+\-×÷*/]\s*(?:\d+(?:\.\d+)?\s*)?[A-Za-z0-9](?:\^\{?[-+]?\d+\}?)?)*
+        \s*(?:=|≤|≥|<|>)\s*
+        [-+]?\d*(?:\.\d+)?[A-Za-z0-9]*(?:\^\{?[-+]?\d+\}?)?
+        (?:\s*[+\-×÷*/]\s*[-+]?\d*(?:\.\d+)?[A-Za-z0-9]*(?:\^\{?[-+]?\d+\}?)?)*
+        |
+        \([^()\n]{1,100}\)\^\{?[-+]?\d+\}?
+        |
+        (?<!\w)[A-Za-z0-9]+\^\{?[-+]?\d+\}?
+        |
+        (?<!\w)[A-Za-z][A-Za-z0-9]*_\{?[A-Za-z0-9]+\}?
+        |
+        \([-+]?\d+(?:\.\d+)?\s*,\s*[-+]?\d+(?:\.\d+)?\)
+        |
+        (?<!\w)-?\d+(?:\.\d+)?\s*(?:cm|mm|m|km|g|kg|s|h|°|%)(?:\^2|\^3)?\b
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+def append_word_inline_math_linear(paragraph, latex: str) -> None:
+    """Reliable inline native Word math for complex fragments inside prose.
+
+    Word/LibreOffice interoperability is better when inline fractions/radicals are
+    represented in linear mathematical notation. Standalone equation fields still
+    use the fully structured OMML builder above.
+    """
+    text = _latex_display_text(latex)
+    # Convert simple fraction/radical source to readable linear math inside an OMML zone.
+    for _ in range(4):
+        new = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1)/(\2)", text)
+        if new == text:
+            break
+        text = new
+    text = re.sub(r"\\sqrt\{([^{}]+)\}", r"√(\1)", text)
+    text = re.sub(r"\^\{([^{}]+)\}", r"^\1", text)
+    text = re.sub(r"_\{([^{}]+)\}", r"_\1", text)
+    math = OxmlElement("m:oMath")
+    math.append(_omml_run(text))
+    paragraph._p.append(math)
+
+
+def append_word_mixed_math(paragraph, value: str, *, bold_prefix: str = "") -> None:
+    """Write prose normally but place every detected mathematical fragment in OMML.
+
+    This is the Word equivalent of MathIO mixed rendering. MathIO itself is browser-only;
+    native OMML is the editable Word representation.
+    """
+    text = clean_guidance_text(value)
+    text = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", text)
+    text = re.sub(r"\.{3,}", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if bold_prefix:
+        r = paragraph.add_run(bold_prefix)
+        r.bold = True
+    if not text:
+        return
+
+    def append_plain(segment: str) -> None:
+        if not segment:
+            return
+        leading = " " if segment[:1].isspace() else ""
+        trailing = " " if segment[-1:].isspace() else ""
+        core = _plainify_embedded_math(segment.strip()) if segment.strip() else ""
+        paragraph.add_run(leading + core + trailing)
+
+    cursor = 0
+    for match in _WORD_MATH_FRAGMENT_RE.finditer(text):
+        if match.start() > cursor:
+            append_plain(text[cursor:match.start()])
+        fragment = match.group(0).strip()
+        if r"\frac" in fragment or r"\sqrt" in fragment:
+            append_word_inline_math_linear(paragraph, fragment)
         else:
-            # Native OMML run fallback is still editable Word mathematics.
-            math.append(_omml_run(src))
-
-    math_para.append(math)
-    paragraph._p.append(math_para)
-
+            append_word_math(paragraph, fragment)
+        cursor = match.end()
+    if cursor < len(text):
+        append_plain(text[cursor:])
 
 def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
     doc = Document()
@@ -3798,27 +3986,29 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
     if draft.instructions:
         doc.add_heading("Instructions", level=2)
         for item in draft.instructions:
-            doc.add_paragraph(item, style="List Bullet")
+            ip = doc.add_paragraph(style="List Bullet")
+            append_word_mixed_math(ip, item)
 
     doc.add_paragraph()
     for q in draft.questions:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(8)
         r = p.add_run(f"{q.question_number}. "); r.bold = True
-        p.add_run(q.stem_text)
+        append_word_mixed_math(p, q.stem_text)
         for eq in q.stem_equations:
             append_word_math(doc.add_paragraph(), eq)
         if q.diagram_spec:
             box = doc.add_paragraph()
-            rr = box.add_run("Diagram / figure specification: " + q.diagram_spec)
+            rr = box.add_run("Diagram / figure specification: ")
             rr.italic = True
+            append_word_mixed_math(box, q.diagram_spec)
 
         for part in q.parts:
             pp = doc.add_paragraph()
             pp.paragraph_format.left_indent = Cm(0.5)
             if part.label:
                 rr = pp.add_run(part.label + " "); rr.bold = True
-            pp.add_run(part.prompt_text)
+            append_word_mixed_math(pp, part.prompt_text)
             for eq in part.equations:
                 ep = doc.add_paragraph(); ep.paragraph_format.left_indent = Cm(1.0)
                 append_word_math(ep, eq)
@@ -3872,7 +4062,7 @@ def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
                 cells[1].paragraphs[0].add_run(str(mp.marks))
                 cells[2].paragraphs[0].add_run(mp.code)
                 guidance = mp.description + ("; ft allowed" if mp.allow_follow_through else "")
-                cells[3].paragraphs[0].add_run(guidance)
+                append_word_mixed_math(cells[3].paragraphs[0], guidance)
 
     buf = BytesIO(); doc.save(buf); return buf.getvalue()
 
@@ -4328,7 +4518,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-17 · Paper Setter MathIO preview")
+    st.caption("Build 2026-08-18 · MathIO web + native Word equations")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
