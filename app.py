@@ -4497,7 +4497,7 @@ with paper_tab:
                             )
                             if str(getattr(paper_file, "name", "")).lower().endswith(".docx"):
                                 needs_visual = bool(
-                                    detected_question.has_diagram_or_table
+                                    getattr(detected_question, "has_diagram_or_table", False)
                                     or re.search(r"\b(diagram|figure|graph|table|chart|grid|shape|circle|triangle|angle)\b",
                                                  detected_question.question_text or "", re.IGNORECASE)
                                 )
