@@ -739,6 +739,51 @@ class PaperQuestionSolution(BaseModel):
     confidence: Literal["high", "medium", "low"]
 
 
+class SetterPaperPart(BaseModel):
+    label: str = Field(description="Part label such as (a), (b)(i), or empty for a whole question")
+    prompt_text: str = Field(description="Question wording in readable prose; keep equations out of this field")
+    equations: list[str] = Field(default_factory=list, description="Standalone MathIO-ready equations appearing in the question")
+    marks: int = Field(ge=1, le=20)
+    answer_space_lines: int = Field(ge=1, le=30, default=4)
+    solution_steps: list[GuidedStep] = Field(default_factory=list)
+    final_answer_mathio: str = ""
+    marking_points: list[PaperMarkPoint] = Field(default_factory=list)
+
+
+class SetterPaperQuestion(BaseModel):
+    question_number: str
+    topic: str
+    ao: Literal["AO1", "AO2", "AO3"]
+    difficulty: Literal["routine", "standard", "stretch"]
+    stem_text: str = Field(description="Main question stem in readable prose; no raw LaTeX")
+    stem_equations: list[str] = Field(default_factory=list)
+    diagram_spec: str = Field(default="", description="Concise diagram/table/graph specification when genuinely required")
+    parts: list[SetterPaperPart]
+    marks: int = Field(ge=1, le=30)
+
+
+class SetterMarkSummary(BaseModel):
+    label: str
+    marks: int = Field(ge=0)
+    percentage: float = Field(ge=0, le=100)
+
+
+class ExamPaperDraft(BaseModel):
+    school_name: str = ""
+    paper_title: str
+    assessment_type: str
+    track_label: str
+    duration_minutes: int = Field(ge=10, le=300)
+    total_marks: int = Field(ge=5, le=200)
+    instructions: list[str] = Field(default_factory=list)
+    reference_format_summary: list[str] = Field(default_factory=list)
+    questions: list[SetterPaperQuestion]
+    topic_distribution: list[SetterMarkSummary] = Field(default_factory=list)
+    ao_distribution: list[SetterMarkSummary] = Field(default_factory=list)
+    verification_notes: list[str] = Field(default_factory=list)
+    confidence: Literal["high", "medium", "low"]
+
+
 class GeminiTutorError(RuntimeError):
     def __init__(self, message: str, category: str = "service") -> None:
         super().__init__(message)
@@ -1855,6 +1900,176 @@ def _validate_practice_question_completeness(question: TargetedPracticeQuestion)
         )
 
 
+
+
+def generate_exam_paper_draft(
+    *,
+    track_label: str,
+    assessment_type: str,
+    total_marks: int,
+    number_of_questions: int,
+    duration_minutes: int,
+    topics: list[str],
+    syllabus_notes: str,
+    reference_text: str = "",
+    reference_assets: list[UploadedAsset] | None = None,
+    school_name: str = "",
+    paper_title: str = "",
+    include_marking_scheme: bool = True,
+    api_key: str | None = None,
+    model: str | None = None,
+    client=None,
+) -> ExamPaperDraft:
+    """Set a fresh syllabus-bounded paper using the uploaded reference as format authority."""
+    reference_assets = reference_assets or []
+    if not reference_assets and not reference_text.strip():
+        raise GeminiTutorError(
+            "Upload a reference paper for this assessment type. The paper setter does not guess a format.",
+            category="input",
+        )
+    if not topics and not syllabus_notes.strip():
+        raise GeminiTutorError("Choose at least one syllabus topic/chapter before setting the paper.", category="input")
+
+    active_client = client or _make_client(api_key)
+    topic_text = ", ".join(topics) if topics else "See teacher syllabus notes"
+    scheme_rule = (
+        "Generate solution_steps and Cambridge-style marking_points for every part."
+        if include_marking_scheme
+        else "Still solve every part internally for correctness, but marking_points may be empty."
+    )
+
+    prompt = f"""
+You are setting an original Singapore secondary Mathematics assessment paper.
+
+NON-NEGOTIABLE PAPER-SETTER RULES
+1. The UPLOADED REFERENCE PAPER is the format authority. Mirror its section order,
+   numbering style, marks placement, working-space expectations, command-word register,
+   and difficulty gradient. Do not copy its questions, contexts, values or answers.
+2. Use ONLY the syllabus scope explicitly supplied below. Do not introduce an untaught technique.
+3. Total marks must equal EXACTLY {total_marks}. Use exactly {number_of_questions} main questions.
+4. Use Singapore/MOE mathematical notation and British English.
+5. Use "determine" and "find" where appropriate; never use "decide" or "check" as command words.
+6. For diagrams, angle variables are bare letters; do not put a degree symbol in a diagram label.
+7. AO3 questions must contain a genuine mathematical decision point; if an estimate and exact
+   calculation are compared with a threshold, they must fall on different sides of that threshold.
+8. Use fresh, clean numbers and solve EVERY question yourself before returning it.
+9. Every part must be answerable from the information provided.
+10. Mathematics in prompt_text/stem_text must be prose only. Put mathematical expressions in the
+    equations arrays so the Word exporter can create native equation objects.
+11. {scheme_rule}
+12. Marking points are a suggested Cambridge-style teacher scheme: M1 method, A1 accuracy,
+    B1 independent result/fact, E1 explanation. Partial-mark points for each part must sum to
+    that part's marks. Do not invent official examiner tolerances.
+13. Do not silently repair a bad reference-paper mark total. Instead note it in verification_notes
+    and still make THIS newly generated paper total exactly {total_marks} marks.
+
+SELECTED TRACK / SYLLABUS
+{track_label}
+{syllabus_context_for_track(track_label)}
+
+TEACHER SCOPE
+Topics/chapters: {topic_text}
+Additional syllabus notes: {syllabus_notes.strip() or '[None]'}
+
+ASSESSMENT SETTINGS
+Assessment type: {assessment_type}
+Duration: {duration_minutes} minutes
+Total marks: {total_marks}
+Main questions: {number_of_questions}
+School: {school_name or '[Infer from reference if visible]'}
+Requested title: {paper_title or '[Create a suitable title matching the reference]'}
+
+REFERENCE PAPER EXTRACTED TEXT
+{reference_text[:50000] if reference_text.strip() else '[Reference supplied as attachment only]'}
+
+Before returning JSON, audit:
+- every question is fully solvable;
+- every part mark sum equals its question marks;
+- all question marks sum to {total_marks};
+- topic distribution sums to {total_marks};
+- AO distribution sums to {total_marks};
+- no question is outside the stated topics/chapters;
+- difficulty progression follows the reference paper rather than an invented ratio.
+
+Return structured JSON only.
+""".strip()
+
+    inputs: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+    for i, asset in enumerate(reference_assets, 1):
+        inputs.append({"type": "text", "text": f"Reference paper source {i}: {asset.name}. Use for FORMAT only, never copy questions."})
+        inputs.append(_encode_asset(asset))
+
+    def request(extra: str = "") -> ExamPaperDraft:
+        interaction = active_client.interactions.create(
+            model=get_model(model),
+            store=False,
+            input=inputs + ([{"type": "text", "text": extra}] if extra else []),
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": ExamPaperDraft.model_json_schema(),
+            },
+        )
+        return ExamPaperDraft.model_validate_json(interaction.output_text)
+
+    try:
+        result = request()
+    except Exception as exc:
+        raise _translate_exception(exc) from exc
+
+    def audit_marks(draft: ExamPaperDraft) -> tuple[int, list[str]]:
+        issues: list[str] = []
+        q_total = 0
+        seen: set[str] = set()
+        for q in draft.questions:
+            if q.question_number in seen:
+                issues.append(f"Duplicate question number {q.question_number}")
+            seen.add(q.question_number)
+            part_total = sum(p.marks for p in q.parts)
+            if part_total != q.marks:
+                issues.append(f"Question {q.question_number}: part marks {part_total} != question marks {q.marks}")
+            if include_marking_scheme:
+                for p in q.parts:
+                    scheme_marks = sum(mp.marks for mp in p.marking_points)
+                    if scheme_marks != p.marks:
+                        issues.append(
+                            f"Question {q.question_number}{p.label}: marking points {scheme_marks} != part marks {p.marks}"
+                        )
+            q_total += q.marks
+        if len(draft.questions) != number_of_questions:
+            issues.append(f"Generated {len(draft.questions)} questions instead of {number_of_questions}")
+        if q_total != total_marks:
+            issues.append(f"Question marks total {q_total} instead of {total_marks}")
+        return q_total, issues
+
+    _, issues = audit_marks(result)
+    if issues:
+        correction = (
+            "Correct ONLY the structural/mark-allocation problems below. Preserve valid questions, wording and numbering. "
+            "Return the complete corrected JSON object.\n- " + "\n- ".join(issues)
+        )
+        try:
+            result = request(correction)
+        except Exception as exc:
+            raise _translate_exception(exc) from exc
+        _, issues = audit_marks(result)
+
+    if issues:
+        raise GeminiTutorError(
+            "The generated paper failed the mark-allocation audit: " + "; ".join(issues[:8]),
+            category="format",
+        )
+
+    # Make requested settings authoritative even if the model reformats labels.
+    result.track_label = track_label
+    result.assessment_type = assessment_type
+    result.duration_minutes = duration_minutes
+    result.total_marks = total_marks
+    if school_name.strip():
+        result.school_name = school_name.strip()
+    if paper_title.strip():
+        result.paper_title = paper_title.strip()
+    return result
 
 
 def generate_paper_question_solution(

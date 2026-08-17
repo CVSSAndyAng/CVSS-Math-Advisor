@@ -19,6 +19,11 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.shared import Pt, Cm
 from pypdf import PdfReader, PdfWriter
 
 from gemini_service import (
@@ -28,6 +33,8 @@ from gemini_service import (
     GeminiTutorError,
     MathVerificationResult,
     PaperQuestionSolution,
+    PaperMarkPoint,
+    ExamPaperDraft,
     PracticeEvaluation,
     QuestionDetectionResult,
     QuestionFeasibilityResult,
@@ -41,6 +48,7 @@ from gemini_service import (
     generate_followup_practice_question,
     generate_guided_solution,
     generate_paper_question_solution,
+    generate_exam_paper_draft,
     generate_visual_explanation,
     get_api_key,
     required_parts_for_question,
@@ -3649,6 +3657,185 @@ def render_paper_question_solution(solution: PaperQuestionSolution) -> None:
         st.markdown(f"**Question total: {solution.total_marks} marks**")
 
 
+def _omml_run(text: str):
+    run = OxmlElement("m:r")
+    t = OxmlElement("m:t")
+    t.text = text
+    run.append(t)
+    return run
+
+
+def _latex_display_text(value: str) -> str:
+    """Conservative conversion for Word equation zones; keeps meaning readable."""
+    text = str(value or "").strip()
+    replacements = {
+        r"\\times": "×", r"\\div": "÷", r"\\pi": "π", r"\\theta": "θ",
+        r"\\leq": "≤", r"\\le": "≤", r"\\geq": "≥", r"\\ge": "≥",
+        r"\\neq": "≠", r"\\pm": "±", r"\\circ": "°", r"\\cdot": "·",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    text = re.sub(r"\\(?:left|right)", "", text)
+    text = re.sub(r"\\text\{([^{}]*)\}", r"\1", text)
+    return text
+
+
+def append_word_math(paragraph, latex: str) -> None:
+    """Insert a native OMML math zone. Fractions/radicals are structurally represented when simple."""
+    src = _latex_display_text(latex)
+    math_para = OxmlElement("m:oMathPara")
+    math = OxmlElement("m:oMath")
+
+    # Simple whole-expression fraction.
+    m = re.fullmatch(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", src)
+    if m:
+        frac = OxmlElement("m:f")
+        num = OxmlElement("m:num"); num.append(_omml_run(m.group(1)))
+        den = OxmlElement("m:den"); den.append(_omml_run(m.group(2)))
+        frac.extend([num, den]); math.append(frac)
+    else:
+        # Simple square-root whole expression.
+        m = re.fullmatch(r"\\sqrt\{([^{}]+)\}", src)
+        if m:
+            rad = OxmlElement("m:rad")
+            deg = OxmlElement("m:deg")
+            elem = OxmlElement("m:e"); elem.append(_omml_run(m.group(1)))
+            rad.extend([deg, elem]); math.append(rad)
+        else:
+            # Native OMML run fallback is still editable Word mathematics.
+            math.append(_omml_run(src))
+
+    math_para.append(math)
+    paragraph._p.append(math_para)
+
+
+def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
+    doc = Document()
+    sec = doc.sections[0]
+    sec.top_margin = Cm(1.5); sec.bottom_margin = Cm(1.5)
+    sec.left_margin = Cm(1.8); sec.right_margin = Cm(1.8)
+
+    styles = doc.styles
+    styles["Normal"].font.name = "Arial"
+    styles["Normal"].font.size = Pt(10.5)
+
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(draft.school_name or "School Mathematics Department"); r.bold = True; r.font.size = Pt(12)
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(draft.paper_title); r.bold = True; r.font.size = Pt(15)
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.add_run(f"{draft.track_label}    |    {draft.duration_minutes} minutes    |    {draft.total_marks} marks")
+
+    if draft.instructions:
+        doc.add_heading("Instructions", level=2)
+        for item in draft.instructions:
+            doc.add_paragraph(item, style="List Bullet")
+
+    doc.add_paragraph()
+    for q in draft.questions:
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(8)
+        r = p.add_run(f"{q.question_number}. "); r.bold = True
+        p.add_run(q.stem_text)
+        for eq in q.stem_equations:
+            append_word_math(doc.add_paragraph(), eq)
+        if q.diagram_spec:
+            box = doc.add_paragraph()
+            rr = box.add_run("Diagram / figure specification: " + q.diagram_spec)
+            rr.italic = True
+
+        for part in q.parts:
+            pp = doc.add_paragraph()
+            pp.paragraph_format.left_indent = Cm(0.5)
+            if part.label:
+                rr = pp.add_run(part.label + " "); rr.bold = True
+            pp.add_run(part.prompt_text)
+            for eq in part.equations:
+                ep = doc.add_paragraph(); ep.paragraph_format.left_indent = Cm(1.0)
+                append_word_math(ep, eq)
+            markp = doc.add_paragraph(); markp.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            markp.add_run(f"[{part.marks}]")
+            for _ in range(max(1, min(part.answer_space_lines, 12))):
+                doc.add_paragraph(" ")
+
+    buf = BytesIO(); doc.save(buf); return buf.getvalue()
+
+
+def _set_cell_shading(cell, fill: str) -> None:
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), fill); shd.set(qn("w:val"), "clear")
+    tcPr.append(shd)
+
+
+def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
+    doc = Document()
+    doc.styles["Normal"].font.name = "Arial"; doc.styles["Normal"].font.size = Pt(9.5)
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run((draft.school_name or "School Mathematics Department") + "\n"); r.bold = True
+    r = p.add_run(draft.paper_title + " - Marking Scheme"); r.bold = True; r.font.size = Pt(14)
+    p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.add_run(f"{draft.track_label} | Total: {draft.total_marks} marks")
+    doc.add_paragraph("AI-generated teacher draft. Recheck against departmental/official marking conventions before formal use.")
+
+    for q in draft.questions:
+        doc.add_heading(f"Question {q.question_number}", level=2)
+        table = doc.add_table(rows=1, cols=4)
+        table.style = "Table Grid"
+        headers = ["Answer", "Marks", "Partial Marks", "Guidance"]
+        for cell, text in zip(table.rows[0].cells, headers):
+            _set_cell_shading(cell, "D9D9D9")
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            pr = cell.paragraphs[0]; pr.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            rr = pr.add_run(text); rr.bold = True
+
+        for part in q.parts:
+            rows = part.marking_points or [PaperMarkPoint(code="", marks=part.marks, description="Correct complete solution", allow_follow_through=False)]
+            for i, mp in enumerate(rows):
+                cells = table.add_row().cells
+                cells[0].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if i == 0:
+                    if part.final_answer_mathio:
+                        append_word_math(cells[0].paragraphs[0], part.final_answer_mathio)
+                    else:
+                        cells[0].paragraphs[0].add_run(part.label or "Answer")
+                cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                cells[1].paragraphs[0].add_run(str(mp.marks))
+                cells[2].paragraphs[0].add_run(mp.code)
+                guidance = mp.description + ("; ft allowed" if mp.allow_follow_through else "")
+                cells[3].paragraphs[0].add_run(guidance)
+
+    buf = BytesIO(); doc.save(buf); return buf.getvalue()
+
+
+def render_setter_preview(draft: ExamPaperDraft) -> None:
+    st.markdown("### Generated paper blueprint")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total marks", draft.total_marks)
+    c2.metric("Questions", len(draft.questions))
+    c3.metric("Duration", f"{draft.duration_minutes} min")
+
+    rows = []
+    for q in draft.questions:
+        rows.append({"Q": q.question_number, "Topic": q.topic, "AO": q.ao, "Difficulty": q.difficulty, "Marks": q.marks})
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    for q in draft.questions:
+        with st.expander(f"Question {q.question_number} - {q.topic} [{q.marks}]", expanded=False):
+            st.write(q.stem_text)
+            for eq in q.stem_equations:
+                render_mathio(eq)
+            if q.diagram_spec:
+                st.caption("Diagram/figure: " + q.diagram_spec)
+            for part in q.parts:
+                st.markdown(f"**{part.label or 'Question'} [{part.marks}]**")
+                st.write(part.prompt_text)
+                for eq in part.equations:
+                    render_mathio(eq)
+
+
 def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:
     files = files or []
     assets: list[UploadedAsset] = []
@@ -4003,9 +4190,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ai_tab, paper_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
+ai_tab, setter_tab, paper_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
     [
         "✨ Analyse",
+        "🧑‍🏫 Paper setter",
         "📝 Full paper",
         "🧠 Offline practice",
         "✎ Algebra check",
@@ -4024,6 +4212,161 @@ st.session_state.setdefault("paper_detection", None)
 st.session_state.setdefault("paper_solutions", [])
 st.session_state.setdefault("paper_errors", [])
 st.session_state.setdefault("paper_signature", "")
+st.session_state.setdefault("setter_draft", None)
+st.session_state.setdefault("setter_error", "")
+st.session_state.setdefault("setter_reference_signature", "")
+
+# ---------- Teacher paper setter ----------
+with setter_tab:
+    st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
+    st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
+    st.write(
+        "Choose the syllabus scope, assessment type, marks and duration, then upload a past paper that defines the format. "
+        "The generator follows that reference structure while writing fresh questions."
+    )
+    st.info(
+        "The reference paper is required: format, numbering, mark placement and difficulty gradient are not guessed. "
+        "Generated marking schemes are teacher drafts, not official SEAB/MOE schemes."
+    )
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        st.markdown("#### 1 · Assessment settings")
+        st.text_input("Selected level / syllabus", value=track_label, disabled=True, key="setter_track_display")
+        setter_assessment = st.selectbox(
+            "Assessment type",
+            ["Weighted Assessment (WA)", "End-of-Year (EOY)", "Class test", "Worksheet", "Preliminary examination"],
+            key="setter_assessment_type",
+        )
+        c1, c2 = st.columns(2)
+        setter_marks = c1.number_input("Total marks", min_value=10, max_value=200, value=50, step=5, key="setter_total_marks")
+        setter_questions = c2.number_input("Main questions", min_value=1, max_value=40, value=12, step=1, key="setter_question_count")
+        setter_duration = st.number_input("Duration (minutes)", min_value=20, max_value=240, value=75, step=5, key="setter_duration")
+        setter_school = st.text_input("School name (optional - otherwise infer from reference)", key="setter_school")
+        setter_title = st.text_input("Paper title (optional)", key="setter_title")
+
+    with right:
+        st.markdown("#### 2 · Syllabus scope")
+        available_strands = selected_track_info(track_label).get("strands", [])
+        setter_topics = st.multiselect(
+            "Topics / strands to test",
+            options=available_strands,
+            default=available_strands,
+            key="setter_topics",
+        )
+        setter_syllabus_notes = st.text_area(
+            "Exact chapters / techniques taught",
+            key="setter_syllabus_notes",
+            height=130,
+            placeholder=(
+                "Example: Algebraic manipulation; linear equations; Pythagoras; trigonometry. "
+                "List exclusions too, e.g. no quadratic formula yet."
+            ),
+            help="Use this to narrow the broad syllabus strands to the exact taught chapters.",
+        )
+        include_scheme = st.checkbox(
+            "Generate marking scheme together with the paper",
+            value=False,
+            key="setter_include_scheme",
+        )
+
+    st.markdown("#### 3 · Reference format paper (required)")
+    setter_reference = st.file_uploader(
+        "Upload a past paper of the SAME assessment type",
+        type=["pdf", "docx", "doc"],
+        accept_multiple_files=False,
+        key="setter_reference_upload",
+        help="This paper is used for format, section structure, mark placement and difficulty gradient only. Questions are not copied.",
+    )
+
+    reference_ready = False
+    reference_text = ""
+    reference_assets: list[UploadedAsset] = []
+    if setter_reference is not None:
+        try:
+            reference_text, reference_assets = full_paper_input(setter_reference)
+            reference_ready = bool(reference_assets or reference_text.strip())
+            st.success(
+                f"Reference loaded: {setter_reference.name}"
+                + (f" · {len(reference_text):,} characters extracted" if reference_text else "")
+            )
+        except GeminiTutorError as exc:
+            st.error(str(exc))
+
+    scope_ready = bool(setter_topics or setter_syllabus_notes.strip())
+    can_generate = reference_ready and scope_ready
+
+    if st.button(
+        "Generate assessment paper",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_generate,
+        key="setter_generate_button",
+    ):
+        st.session_state.setter_error = ""
+        st.session_state.setter_draft = None
+        try:
+            with st.spinner("Reading the reference format, setting questions and auditing mark totals..."):
+                draft = generate_exam_paper_draft(
+                    track_label=track_label,
+                    assessment_type=setter_assessment,
+                    total_marks=int(setter_marks),
+                    number_of_questions=int(setter_questions),
+                    duration_minutes=int(setter_duration),
+                    topics=list(setter_topics),
+                    syllabus_notes=setter_syllabus_notes,
+                    reference_text=reference_text,
+                    reference_assets=reference_assets,
+                    school_name=setter_school,
+                    paper_title=setter_title,
+                    include_marking_scheme=include_scheme,
+                    api_key=explicit_key,
+                    model=model,
+                )
+            st.session_state.setter_draft = draft
+            st.rerun()
+        except GeminiTutorError as exc:
+            st.session_state.setter_error = str(exc)
+            st.rerun()
+        except Exception as exc:
+            st.session_state.setter_error = f"{type(exc).__name__}: {str(exc)[:400]}"
+            st.rerun()
+
+    if st.session_state.get("setter_error"):
+        st.error(st.session_state.setter_error)
+
+    setter_draft = st.session_state.get("setter_draft")
+    if setter_draft is not None:
+        render_setter_preview(setter_draft)
+
+        if setter_draft.reference_format_summary:
+            with st.expander("Reference-format features used", expanded=False):
+                for item in setter_draft.reference_format_summary:
+                    st.markdown(f"- {item}")
+
+        if setter_draft.verification_notes:
+            with st.expander("Paper audit notes", expanded=False):
+                for item in setter_draft.verification_notes:
+                    st.markdown(f"- {item}")
+
+        question_docx = build_setter_question_paper_docx(setter_draft)
+        downloads = st.columns(2 if include_scheme else 1)
+        downloads[0].download_button(
+            "Download question paper (.docx)",
+            data=question_docx,
+            file_name="Generated_Maths_Question_Paper.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+        if include_scheme:
+            scheme_docx = build_setter_marking_scheme_docx(setter_draft)
+            downloads[1].download_button(
+                "Download marking scheme (.docx)",
+                data=scheme_docx,
+                file_name="Generated_Maths_Marking_Scheme.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
 
 # ---------- Full paper worked solutions ----------
 with paper_tab:
