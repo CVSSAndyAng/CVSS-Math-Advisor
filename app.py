@@ -365,7 +365,25 @@ MATHLIVE_VERSION = "0.110.0"  # Patched MathLive release used by the visual equa
 _EQUATION_EDITOR_HTML = """
 <div class="omt-math-editor">
   <div class="omt-editor-label"></div>
-  <div class="omt-editor-help">Type directly into each maths box. Use the keyboard icon for fractions, roots, powers, trig and symbols.</div>
+  <div class="omt-editor-help">Type directly into each maths box. Use the quick equation tools or tap <b>Math keyboard</b> for the full mathematics keyboard.</div>
+  <div class="omt-math-toolbar" role="toolbar" aria-label="Math equation tools">
+    <button type="button" data-insert="\\frac{#@}{#?}" title="Fraction">a⁄b</button>
+    <button type="button" data-insert="\\sqrt{#0}" title="Square root">√</button>
+    <button type="button" data-insert="#@^{#?}" title="Power">xʸ</button>
+    <button type="button" data-insert="#@_{#?}" title="Subscript">xₙ</button>
+    <button type="button" data-insert="\\sin\\left(#0\\right)">sin</button>
+    <button type="button" data-insert="\\cos\\left(#0\\right)">cos</button>
+    <button type="button" data-insert="\\tan\\left(#0\\right)">tan</button>
+    <button type="button" data-insert="\\log_{#?}\\left(#0\\right)">log</button>
+    <button type="button" data-insert="\\ln\\left(#0\\right)">ln</button>
+    <button type="button" data-insert="\\pi">π</button>
+    <button type="button" data-insert="\\theta">θ</button>
+    <button type="button" data-insert="^{\\circ}">°</button>
+    <button type="button" data-insert="\\le">≤</button>
+    <button type="button" data-insert="\\ge">≥</button>
+    <button type="button" data-insert="\\pm">±</button>
+    <button type="button" class="omt-keyboard-toggle">⌨ Math keyboard</button>
+  </div>
   <div class="omt-editor-rows"></div>
   <div class="omt-editor-actions">
     <button type="button" class="omt-add-step">＋ Add step</button>
@@ -377,6 +395,14 @@ _EQUATION_EDITOR_HTML = """
 _EQUATION_EDITOR_CSS = """
 .omt-math-editor { width: 100%; font-family: var(--st-font, sans-serif); }
 .omt-editor-label { font-weight: 600; margin-bottom: .3rem; }
+
+.omt-math-toolbar { display:flex; flex-wrap:wrap; gap:.35rem; margin:.35rem 0 .65rem; align-items:center; }
+.omt-math-toolbar button { border:1px solid rgba(128,128,128,.38); border-radius:.45rem; background:transparent; color:var(--st-text-color,#222); min-height:2.25rem; padding:.3rem .55rem; cursor:pointer; font-size:.92rem; }
+.omt-math-toolbar button:hover, .omt-math-toolbar button:focus-visible { border-color:var(--st-primary-color,#ff4b4b); outline:none; }
+.omt-math-toolbar .omt-keyboard-toggle { font-weight:600; padding-inline:.75rem; }
+math-field::part(virtual-keyboard-toggle) { display:none; }
+body { --keyboard-zindex: 999999; }
+
 .omt-editor-help { color: var(--st-text-color); opacity: .72; font-size: .86rem; margin-bottom: .65rem; }
 .omt-editor-row { display: grid; grid-template-columns: 3.2rem minmax(0,1fr) 2.5rem; align-items: center; gap: .45rem; margin: .45rem 0; }
 .omt-step-label { font-size: .83rem; opacity: .75; }
@@ -394,7 +420,7 @@ _EQUATION_EDITOR_CSS = """
 }
 @media (pointer: coarse) {
   .omt-editor-row math-field { min-height: 4rem; font-size: 1.2rem; padding: .7rem .75rem; }
-  .omt-add-step, .omt-remove-step { min-height: 44px; min-width: 44px; }
+  .omt-add-step, .omt-remove-step, .omt-math-toolbar button { min-height: 44px; min-width: 44px; }
 }
 """
 
@@ -402,12 +428,10 @@ _EQUATION_EDITOR_JS = f"""
 const MATHLIVE_URL = 'https://cdn.jsdelivr.net/npm/mathlive@{MATHLIVE_VERSION}/+esm';
 
 async function ensureMathLive() {{
-  if (!customElements.get('math-field')) {{
-    if (!globalThis.__omtMathLivePromise) {{
-      globalThis.__omtMathLivePromise = import(MATHLIVE_URL);
-    }}
-    await globalThis.__omtMathLivePromise;
-  }}
+  if (!globalThis.__omtMathLivePromise) globalThis.__omtMathLivePromise = import(MATHLIVE_URL);
+  const module = await globalThis.__omtMathLivePromise;
+  if (!customElements.get('math-field')) await customElements.whenDefined('math-field');
+  return module;
 }}
 
 function normalizedPayload(raw) {{
@@ -424,29 +448,57 @@ export default async function(component) {{
   const rows = parentElement.querySelector('.omt-editor-rows');
   const addButton = parentElement.querySelector('.omt-add-step');
   const status = parentElement.querySelector('.omt-editor-status');
+  const toolbar = parentElement.querySelector('.omt-math-toolbar');
+  const keyboardButton = parentElement.querySelector('.omt-keyboard-toggle');
   label.textContent = data?.label || 'Student working';
 
-  try {{
-    await ensureMathLive();
-  }} catch (err) {{
-    status.textContent = 'Equation editor could not load. Check the browser connection and reload the page.';
-    return;
+  let module;
+  try {{ module = await ensureMathLive(); }}
+  catch (err) {{ status.textContent = 'Equation editor could not load. Reload the page.'; return; }}
+
+  const vk = module?.mathVirtualKeyboard || globalThis.mathVirtualKeyboard || null;
+  if (vk) {{
+    vk.layouts = [
+      {{
+        id: 'sg-math',
+        label: 'Math tools',
+        tooltip: 'Common school mathematics equations and symbols',
+        rows: [
+          [
+            {{ latex: '\\\\frac{{#@}}{{#?}}', label: '\\\\frac{{a}}{{b}}' }},
+            {{ latex: '\\\\sqrt{{#0}}', label: '\\\\sqrt{{x}}' }},
+            {{ latex: '#@^{{#?}}', label: 'x^n' }},
+            {{ latex: '#@_{{#?}}', label: 'x_n' }},
+            '=', '+', '-', '\\\\times', '\\\\div'
+          ],
+          [
+            {{ latex: '\\\\sin\\\\left(#0\\\\right)', label: '\\\\sin' }},
+            {{ latex: '\\\\cos\\\\left(#0\\\\right)', label: '\\\\cos' }},
+            {{ latex: '\\\\tan\\\\left(#0\\\\right)', label: '\\\\tan' }},
+            {{ latex: '\\\\log_{{#?}}\\\\left(#0\\\\right)', label: '\\\\log' }},
+            {{ latex: '\\\\ln\\\\left(#0\\\\right)', label: '\\\\ln' }},
+            '\\\\pi', '\\\\theta', {{ latex: '^{{\\\\circ}}', label: '90^\\\\circ' }}, '\\\\pm'
+          ],
+          ['[7]','[8]','[9]','[(]','[)]','\\\\lt','\\\\le','\\\\gt','\\\\ge'],
+          ['[4]','[5]','[6]','[1]','[2]','[3]','[0]','[.]',{{ label:'[backspace]', width:1.5 }}]
+        ]
+      }},
+      'functions', 'symbols', 'alphabetic', 'greek'
+    ];
   }}
 
   const incoming = normalizedPayload(data?.payload);
-  const state = parentElement.__omtState || {{ payload: incoming, timer: null }};
+  const state = parentElement.__omtState || {{ payload: incoming, timer: null, active: null }};
   parentElement.__omtState = state;
-
-  // Python session state is authoritative after a Streamlit rerun.
   state.payload = incoming;
+
+  const currentField = () => state.active && rows.contains(state.active) ? state.active : rows.querySelector('math-field');
 
   const emit = () => {{
     const editors = Array.from(rows.querySelectorAll('math-field'));
     state.payload = {{
       latex: editors.map(mf => mf.value || ''),
-      ascii: editors.map(mf => {{
-        try {{ return mf.getValue('ascii-math') || ''; }} catch (_) {{ return ''; }}
-      }}),
+      ascii: editors.map(mf => {{ try {{ return mf.getValue('ascii-math') || ''; }} catch (_) {{ return ''; }} }})
     }};
     setStateValue('payload', state.payload);
     status.textContent = 'Working saved';
@@ -456,6 +508,21 @@ export default async function(component) {{
     status.textContent = 'Editing…';
     if (state.timer) clearTimeout(state.timer);
     state.timer = setTimeout(emit, 700);
+  }};
+
+  const showKeyboard = () => {{
+    const mf = currentField();
+    if (!mf || !vk) {{ status.textContent = 'Math keyboard unavailable. Reload and try again.'; return; }}
+    state.active = mf;
+    mf.focus();
+    try {{ vk.show(); }} catch (_) {{ try {{ vk.visible = true; }} catch (_) {{}} }}
+    status.textContent = 'Math keyboard open';
+  }};
+
+  const hideKeyboard = () => {{
+    if (!vk) return;
+    try {{ vk.hide(); }} catch (_) {{ try {{ vk.visible = false; }} catch (_) {{}} }}
+    status.textContent = 'Math keyboard hidden';
   }};
 
   const renderRows = () => {{
@@ -470,9 +537,10 @@ export default async function(component) {{
 
       const mf = document.createElement('math-field');
       mf.value = value || '';
-      mf.setAttribute('virtual-keyboard-mode', 'auto');
+      mf.mathVirtualKeyboardPolicy = 'manual';
       mf.setAttribute('smart-fence', '');
       mf.setAttribute('aria-label', `Mathematics working step ${{index + 1}}`);
+      mf.addEventListener('focusin', () => {{ state.active = mf; }});
       mf.addEventListener('input', scheduleEmit);
       mf.addEventListener('change', emit);
       mf.addEventListener('blur', emit);
@@ -482,7 +550,6 @@ export default async function(component) {{
       remove.className = 'omt-remove-step';
       remove.textContent = '✕';
       remove.title = 'Remove this step';
-      remove.setAttribute('aria-label', `Remove step ${{index + 1}}`);
       remove.disabled = state.payload.latex.length <= 1;
       remove.onclick = () => {{
         if (state.payload.latex.length <= 1) return;
@@ -497,17 +564,33 @@ export default async function(component) {{
     }});
   }};
 
+  toolbar.querySelectorAll('button[data-insert]').forEach(button => {{
+    button.onclick = () => {{
+      const mf = currentField();
+      if (!mf) return;
+      state.active = mf;
+      mf.focus();
+      const latex = button.dataset.insert || '';
+      try {{ mf.insert(latex, {{ insertionMode:'replaceSelection', selectionMode:'placeholder' }}); }}
+      catch (_) {{ try {{ mf.executeCommand(['insert', latex]); }} catch (_) {{}} }}
+      scheduleEmit();
+    }};
+  }});
+
+  keyboardButton.onclick = () => {{
+    if (!vk) {{ status.textContent = 'Math keyboard unavailable. Reload and try again.'; return; }}
+    if (vk.visible) hideKeyboard(); else showKeyboard();
+  }};
+
   addButton.onclick = () => {{
-    if (state.payload.latex.length >= 20) {{
-      status.textContent = 'Maximum 20 working steps.';
-      return;
-    }}
+    if (state.payload.latex.length >= 20) {{ status.textContent = 'Maximum 20 working steps.'; return; }}
     state.payload.latex.push('');
     state.payload.ascii.push('');
     renderRows();
     emit();
     const editors = rows.querySelectorAll('math-field');
-    editors[editors.length - 1]?.focus();
+    const mf = editors[editors.length - 1];
+    if (mf) {{ state.active = mf; mf.focus(); }}
   }};
 
   renderRows();
