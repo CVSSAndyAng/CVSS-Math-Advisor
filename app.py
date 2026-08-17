@@ -3878,7 +3878,8 @@ def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
 
 
 def render_setter_preview(draft: ExamPaperDraft) -> None:
-    st.markdown("### Generated paper blueprint")
+    """Render the generated assessment paper with MathIO for all mathematics."""
+    st.markdown("### Generated paper preview")
     c1, c2, c3 = st.columns(3)
     c1.metric("Total marks", draft.total_marks)
     c2.metric("Questions", len(draft.questions))
@@ -3886,22 +3887,63 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
 
     rows = []
     for q in draft.questions:
-        rows.append({"Q": q.question_number, "Topic": q.topic, "AO": q.ao, "Difficulty": q.difficulty, "Marks": q.marks})
+        rows.append(
+            {
+                "Q": q.question_number,
+                "Topic": q.topic,
+                "AO": q.ao,
+                "Difficulty": q.difficulty,
+                "Marks": q.marks,
+            }
+        )
     if rows:
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
+    st.markdown("---")
+    st.markdown("## Question paper")
+
     for q in draft.questions:
-        with st.expander(f"Question {q.question_number} - {q.topic} [{q.marks}]", expanded=False):
-            st.write(q.stem_text)
+        with st.container(border=True):
+            st.markdown(
+                f"### Question {q.question_number} "
+                f"<span style='font-size:.78em;font-weight:500'>[{q.marks} marks]</span>",
+                unsafe_allow_html=True,
+            )
+
+            # Stem prose can itself contain mathematical expressions, so use the
+            # MathIO-aware mixed renderer rather than st.write().
+            if str(q.stem_text or "").strip():
+                render_guidance_mixed_mathio(q.stem_text)
+
+            # Explicit equation fields always render through MathIO.
             for eq in q.stem_equations:
-                render_mathio(eq)
+                eq_text = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", str(eq or ""))
+                eq_text = re.sub(r"\.{3,}", "", eq_text)
+                eq_text = re.sub(r"\s{2,}", " ", eq_text).strip()
+                if eq_text:
+                    render_mathio(eq_text)
+
             if q.diagram_spec:
-                st.caption("Diagram/figure: " + q.diagram_spec)
+                with st.expander("Diagram / figure information", expanded=False):
+                    render_guidance_mixed_mathio(q.diagram_spec)
+
             for part in q.parts:
-                st.markdown(f"**{part.label or 'Question'} [{part.marks}]**")
-                st.write(part.prompt_text)
+                label = part.label or "Question"
+                st.markdown(f"#### {label} [{part.marks} marks]")
+
+                if str(part.prompt_text or "").strip():
+                    render_guidance_mixed_mathio(part.prompt_text)
+
                 for eq in part.equations:
-                    render_mathio(eq)
+                    eq_text = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", str(eq or ""))
+                    eq_text = re.sub(r"\.{3,}", "", eq_text)
+                    eq_text = re.sub(r"\s{2,}", " ", eq_text).strip()
+                    if eq_text:
+                        render_mathio(eq_text)
+
+                # Give the preview some visual answer space without excessive blank area.
+                if getattr(part, "answer_space_lines", 0):
+                    st.caption("Answer space included in downloaded paper.")
 
 
 def uploaded_assets(files: list[Any] | None) -> list[UploadedAsset]:
@@ -4286,7 +4328,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-17 · selectable assessment syllabus")
+    st.caption("Build 2026-08-17 · Paper Setter MathIO preview")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
