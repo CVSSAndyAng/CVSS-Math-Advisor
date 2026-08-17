@@ -3610,51 +3610,119 @@ def build_paper_solution_docx(
     return buffer.getvalue()
 
 
+def render_full_paper_worked_step(step_number: int, step) -> None:
+    """Render Full-paper worked solutions entirely through the MathIO-aware path.
+
+    Explanatory prose stays readable, but any mathematical fragments embedded in it
+    are detected and rendered using MathIO. Standalone equations always use MathIO.
+    """
+    explanation = clean_guidance_text(getattr(step, "explanation", "") or "")
+    equations = [
+        str(eq).strip()
+        for eq in (getattr(step, "equations", []) or [])
+        if str(eq).strip()
+    ]
+
+    # Remove presentation-only ellipsis commands.
+    explanation = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", explanation)
+    explanation = re.sub(r"\.{3,}", "", explanation)
+    explanation = re.sub(r"\s{2,}", " ", explanation).strip()
+
+    cleaned_equations = []
+    for equation in equations:
+        equation = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", equation)
+        equation = re.sub(r"\.{3,}", "", equation)
+        equation = re.sub(r"\s{2,}", " ", equation).strip()
+        if equation:
+            cleaned_equations.append(equation)
+
+    if not explanation and not cleaned_equations:
+        return
+
+    with st.container(border=True):
+        st.markdown(f"#### Step {step_number}")
+
+        # This is the key difference from the old Full-paper renderer:
+        # mixed prose/mathematics uses the MathIO-aware guidance renderer.
+        if explanation:
+            render_guidance_mixed_mathio(explanation)
+
+        for equation in cleaned_equations:
+            render_mathio(equation)
+
+
 def render_paper_question_solution(solution: PaperQuestionSolution) -> None:
     title = f"Question {solution.question_number} · {solution.topic}"
     with st.expander(title, expanded=False):
         if solution.page_numbers:
             st.caption("Paper page(s): " + ", ".join(map(str, solution.page_numbers)))
         st.caption(f"Verification confidence: {solution.confidence.title()}")
+
         if solution.verification_note.strip():
-            st.info(solution.verification_note)
+            st.info(clean_guidance_text(solution.verification_note))
 
         for part in solution.parts:
             st.markdown(f"### {part.label}")
+
+            # Question wording can itself contain equations/functions.
             if part.question_text.strip():
-                st.write(part.question_text)
-            for idx, step in enumerate(part.worked_steps, 1):
-                render_guidance_step(idx, step)
+                render_guidance_mixed_mathio(part.question_text)
+
+            if part.worked_steps:
+                st.markdown("#### Worked solution")
+                for idx, step in enumerate(part.worked_steps, 1):
+                    render_full_paper_worked_step(idx, step)
+
             if part.final_answer_mathio.strip():
-                st.markdown("#### Final answer")
-                render_mathio(part.final_answer_mathio)
+                st.markdown("#### ✅ Final answer")
+                render_mathio(part.final_answer_mathio.strip())
 
             st.markdown(
                 f"#### Suggested marking guide · {part.marks_available} marks"
                 + (" · printed allocation" if part.mark_source == "printed" else " · AI-suggested allocation")
             )
+
             if part.marking_points:
+                # Keep the compact teacher table, but sanitize raw LaTeX commands so
+                # they are not exposed in a dataframe cell.
                 table = pd.DataFrame(
                     [
                         {
                             "Code": point.code,
                             "Marks": point.marks,
-                            "Criterion": point.description,
+                            "Criterion": _plainify_embedded_math(
+                                clean_guidance_text(point.description)
+                            ),
                             "Follow-through": "Yes" if point.allow_follow_through else "",
                         }
                         for point in part.marking_points
                     ]
                 )
                 st.dataframe(table, hide_index=True, use_container_width=True)
+
+                # Optional MathIO view of marking criteria that contain mathematics.
+                math_criteria = [
+                    point
+                    for point in part.marking_points
+                    if _contains_raw_math_source(point.description)
+                    or re.search(r"[A-Za-z0-9]\^\{?\d+\}?|=", point.description)
+                ]
+                if math_criteria:
+                    with st.expander("MathIO view of mathematical marking criteria", expanded=False):
+                        for point in math_criteria:
+                            st.markdown(f"**{point.code} · {point.marks} mark(s)**")
+                            render_guidance_mixed_mathio(point.description)
+
             else:
                 st.caption("No marking points were generated for this part.")
 
             if part.common_errors:
                 with st.expander("Common errors to watch for", expanded=False):
                     for error in part.common_errors:
-                        st.markdown(f"- {error}")
+                        render_guidance_mixed_mathio(f"• {error}")
 
         st.markdown(f"**Question total: {solution.total_marks} marks**")
+
 
 
 def _omml_run(text: str):
@@ -4370,7 +4438,7 @@ with setter_tab:
 
 # ---------- Full paper worked solutions ----------
 with paper_tab:
-    st.caption("Build 2026-08-17 · full-paper visual detection safe")
+    st.caption("Build 2026-08-17 · full-paper MathIO solutions")
     st.markdown('<div class="omt-section-kicker">Teacher / revision workflow</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Full paper worked solutions + marking guide</div>', unsafe_allow_html=True)
     st.write(
