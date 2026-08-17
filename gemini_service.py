@@ -1879,9 +1879,10 @@ def generate_paper_question_solution(
             f"Source pages: {', '.join(map(str, detected_question.page_numbers))}\n"
             if detected_question.page_numbers else ""
         )
-        + "IMPORTANT: The attached scoped page/image is authoritative. Re-read the actual printed question, "
-          "numbers, tables, equations and diagrams from the attachment before verifying or solving. "
-          "Do not declare the question incomplete merely because the detector transcription omitted data."
+        + "IMPORTANT: Use the focused extracted paper context below together with any attachment as authoritative. "
+          "Do not declare the question incomplete merely because the detector summary omitted data.\n"
+        + "FOCUSED EXTRACTED PAPER CONTEXT:\n"
+        + (paper_text_context[:12000] if paper_text_context.strip() else "[No extracted text available]")
     )
 
     verification = verify_question_math(
@@ -1914,8 +1915,8 @@ QUESTION TO SOLVE:
 INDEPENDENT VERIFICATION:
 {verification.model_dump_json(indent=2)}
 
-PAPER TEXT CONTEXT (only if extracted from Word):
-{paper_text_context[:30000] if paper_text_context.strip() else '[None]'}
+PAPER CONTEXT NOTE:
+The focused extracted paper context is already included in QUESTION TO SOLVE above.
 
 REQUIREMENTS
 1. Solve EVERY printed subpart of this question. Do not omit (i)/(ii)/(iii).

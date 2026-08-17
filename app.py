@@ -3451,6 +3451,20 @@ def scope_pdf_asset_to_pages(asset: UploadedAsset, pages: list[int]) -> Uploaded
         return asset
 
 
+def paper_question_text_context(detected_question: Any, paper_text: str) -> str:
+    pieces=[f"Question {detected_question.question_number}", detected_question.question_text or ""]
+    if detected_question.subparts:
+        pieces.append("Subparts:")
+        pieces.extend(f"{p.label}: {p.question_text}" for p in detected_question.subparts)
+    if paper_text:
+        qn=re.escape(str(detected_question.question_number))
+        hits=[re.search(rf"(?im)^\s*{qn}\s*[\.\)]",paper_text),
+              re.search(rf"(?im)^\s*Question\s+{qn}\b",paper_text)]
+        hit=next((m for m in hits if m),None); pos=hit.start() if hit else 0
+        pieces+=["Extracted paper context:",paper_text[pos:pos+9000]]
+    return "\n".join(x for x in pieces if x).strip()
+
+
 def scoped_assets_for_paper_question(
     assets: list[UploadedAsset],
     page_numbers: list[int],
@@ -4110,21 +4124,33 @@ with paper_tab:
                             text=f"Solving Question {detected_question.question_number} ({index}/{total_questions}) · {paper_generation_mode} mode...",
                         )
                         try:
+                            focused_paper_text = paper_question_text_context(detected_question, paper_text)
                             scoped_assets = scoped_assets_for_paper_question(
                                 paper_assets,
                                 detected_question.page_numbers,
                             )
+                            if str(getattr(paper_file, "name", "")).lower().endswith(".docx"):
+                                needs_visual = bool(
+                                    detected_question.has_diagram_or_table
+                                    or re.search(r"\b(diagram|figure|graph|table|chart|grid|shape|circle|triangle|angle)\b",
+                                                 detected_question.question_text or "", re.IGNORECASE)
+                                )
+                                scoped_assets = scoped_assets[:3] if needs_visual else []
                             solution = generate_paper_question_solution(
                                 track_label=track_label,
                                 detected_question=detected_question,
                                 question_assets=scoped_assets,
-                                paper_text_context=paper_text[:12000],
+                                paper_text_context=focused_paper_text,
                                 api_key=explicit_key,
                                 model=model,
                             )
                             solutions.append(solution)
                         except GeminiTutorError as exc:
                             errors.append(f"Question {detected_question.question_number}: {exc}")
+                            message = str(exc).lower()
+                            if "quota" in message or "rate limit" in message or "free-tier" in message:
+                                errors.append("Generation stopped because the Gemini quota/rate limit was reached. Completed questions are preserved; continue later.")
+                                break
                         except Exception as exc:
                             errors.append(
                                 f"Question {detected_question.question_number}: {type(exc).__name__}: {str(exc)[:300]}"
