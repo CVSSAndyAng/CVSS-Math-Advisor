@@ -4286,6 +4286,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
+    st.caption("Build 2026-08-17 · selectable assessment syllabus")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
@@ -4300,7 +4301,20 @@ with setter_tab:
     left, right = st.columns([1, 1], gap="large")
     with left:
         st.markdown("#### 1 · Assessment settings")
-        st.text_input("Selected level / syllabus", value=track_label, disabled=True, key="setter_track_display")
+        setter_track_label = st.selectbox(
+            "Selected level / syllabus",
+            options=list(APP_TRACKS.keys()),
+            index=list(APP_TRACKS.keys()).index(track_label) if track_label in APP_TRACKS else 0,
+            key="setter_track_label",
+            help="Choose the syllabus for this assessment independently of the main tutor sidebar.",
+        )
+        setter_info = selected_track_info(setter_track_label)
+        if setter_info.get("year") == 2027:
+            st.caption(
+                f"{setter_info.get('year')} SEC · {setter_info.get('level')} "
+                f"{setter_info.get('subject')} · {setter_info.get('subject_code')}"
+            )
+
         setter_assessment = st.selectbox(
             "Assessment type",
             ["Weighted Assessment (WA)", "End-of-Year (EOY)", "Class test", "Worksheet", "Preliminary examination"],
@@ -4315,12 +4329,13 @@ with setter_tab:
 
     with right:
         st.markdown("#### 2 · Syllabus scope")
-        available_strands = selected_track_info(track_label).get("strands", [])
+        setter_track_info = selected_track_info(setter_track_label)
+        available_strands = setter_track_info.get("strands", [])
         setter_topics = st.multiselect(
             "Topics / strands to test",
             options=available_strands,
             default=available_strands,
-            key="setter_topics",
+            key=f"setter_topics_{track_code(setter_track_label)}",
         )
         setter_syllabus_notes = st.text_area(
             "Exact chapters / techniques taught",
@@ -4376,7 +4391,7 @@ with setter_tab:
         try:
             with st.spinner("Reading the reference format, setting questions and auditing mark totals..."):
                 draft = generate_exam_paper_draft(
-                    track_label=track_label,
+                    track_label=setter_track_label,
                     assessment_type=setter_assessment,
                     total_marks=int(setter_marks),
                     number_of_questions=int(setter_questions),
