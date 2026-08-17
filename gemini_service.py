@@ -930,6 +930,33 @@ def verify_question_math(
     if not question_text.strip() and not question_assets:
         raise GeminiTutorError("Provide the question before verification.", category="input")
 
+    # IMPORTANT: initialize the client/topology BEFORE building any f-string prompt
+    # that references topology. This guarantees topology is defined for every path,
+    # including non-geometry questions and full-paper generation.
+    active_client = client or _make_client(api_key)
+    topology: DiagramTopologyResult | None = None
+
+    topology_keywords = re.compile(
+        r"\b(shaded|semicircle|circle|arc|sector|composite|region|perimeter|area|diagram)\b",
+        re.IGNORECASE,
+    )
+    if question_assets and (
+        not (question_text or "").strip()
+        or topology_keywords.search(question_text or "")
+    ):
+        try:
+            topology = _extract_geometry_topology(
+                active_client=active_client,
+                track_label=track_label,
+                question_text=question_text,
+                question_assets=question_assets,
+                model=model,
+            )
+        except Exception:
+            # Topology extraction is an accuracy aid. A failure here must not create
+            # an UnboundLocalError or crash ordinary non-geometry verification.
+            topology = None
+
     prompt = f"""
 You are the independent mathematical verifier for a Singapore secondary mathematics tutor ({track_label}).
 Inspect the QUESTION ONLY. Your job is verification, not tutoring style and not marking the student's solution.
@@ -982,27 +1009,6 @@ VERIFICATION EVIDENCE RULES
     for i, asset in enumerate(question_assets, 1):
         inputs.append({"type": "text", "text": f"Question source {i}: {asset.name}"})
         inputs.append(_encode_asset(asset))
-
-    active_client = client or _make_client(api_key)
-
-    # Geometry topology is established BEFORE calculation. This prevents a later
-    # numerical verifier from confirming the wrong reconstructed diagram.
-    topology: DiagramTopologyResult | None = None
-    topology_keywords = re.compile(
-        r"\b(shaded|semicircle|circle|arc|sector|composite|region|perimeter|area|diagram)\b",
-        re.IGNORECASE,
-    )
-    if question_assets and (not (question_text or "").strip() or topology_keywords.search(question_text or "")):
-        try:
-            topology = _extract_geometry_topology(
-                active_client=active_client,
-                track_label=track_label,
-                question_text=question_text,
-                question_assets=question_assets,
-                model=model,
-            )
-        except Exception:
-            topology = None
 
     try:
         # Pass 1: verification/reasoning with Python code execution available.
