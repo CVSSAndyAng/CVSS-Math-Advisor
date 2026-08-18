@@ -737,6 +737,10 @@ class PaperQuestionSolution(BaseModel):
     question_number: str
     topic: str
     page_numbers: list[int] = Field(default_factory=list)
+    diagram_scene_2d: VisualScene2D | None = Field(
+        default=None,
+        description="A clean 2D diagram/graph scene for the worked solution when a visual materially helps. Null otherwise.",
+    )
     parts: list[PaperPartSolution]
     total_marks: int = Field(ge=0, le=100)
     verification_note: str
@@ -762,6 +766,13 @@ class SetterPaperQuestion(BaseModel):
     stem_text: str = Field(description="Main question stem in readable prose; no raw LaTeX")
     stem_equations: list[str] = Field(default_factory=list)
     diagram_spec: str = Field(default="", description="Concise diagram/table/graph specification when genuinely required")
+    diagram_scene_2d: VisualScene2D | None = Field(
+        default=None,
+        description=(
+            "Structured drawable diagram/graph for any question that requires a visual. "
+            "Use points, segments, polylines, circles, angles and axes. Null when no visual is required."
+        ),
+    )
     parts: list[SetterPaperPart]
     marks: int = Field(ge=1, le=30)
 
@@ -1959,7 +1970,15 @@ NON-NEGOTIABLE PAPER-SETTER RULES
    calculation are compared with a threshold, they must fall on different sides of that threshold.
 8. Use fresh, clean numbers and solve EVERY question yourself before returning it.
 9. Every part must be answerable from the information provided.
-10. ALL mathematical notation must be separated from prose wherever possible.
+10. DIAGRAM REQUIREMENT:
+    - If a question requires a geometry diagram, coordinate axes, graph, number line, construction, or other visual,
+      populate diagram_scene_2d with a complete drawable scene. Do not return only a prose diagram_spec.
+    - Include every point/line/circle/curve/angle label that the student needs.
+    - For graph or coordinate questions set show_axes=true and choose sensible x/y bounds.
+    - For geometry diagrams use a clear schematic; it need not be to scale unless the question explicitly requires scale.
+    - For 3D questions provide a clear 2D projected/isometric schematic using points and segments.
+    - Set diagram_scene_2d=null only when no diagram materially helps or is required.
+11. ALL mathematical notation must be separated from prose wherever possible.
     - stem_text and prompt_text contain ordinary language only.
     - Put formulas, equations, expressions, coordinates, powers, roots, fractions, inequalities,
       function definitions, units attached to symbolic quantities, and symbolic answers in the equations arrays.
@@ -2163,6 +2182,10 @@ REQUIREMENTS
 12. Do not invent examiner tolerances or official alternative-answer notes not supported by the paper.
 13. Keep marking points concise and teacher-readable.
 14. Include common_errors only when genuinely useful.
+15. If the question requires a diagram, graph, coordinate axes, geometry construction or visual explanation,
+    populate diagram_scene_2d with a clean drawable scene matching the actual question and solution.
+    Use show_axes=true for graph/coordinate questions. For 3D geometry, provide a clear projected/isometric 2D schematic.
+    Set diagram_scene_2d=null for genuinely non-visual questions.
 
 Return structured JSON only.
 """.strip()
@@ -2224,6 +2247,7 @@ RULES:
 - Provide a concise suggested marking guide.
 - Printed marks if visible; otherwise suggested marks.
 - This is not an official SEAB/MOE mark scheme.
+- Include diagram_scene_2d when a diagram/graph is required; otherwise null.
 - Return JSON matching the required schema only.
 """.strip()
             result = _structured_request(retry_prompt)
@@ -2241,7 +2265,7 @@ INDEPENDENT VERIFICATION:
 {verification.model_dump_json(indent=2)}
 
 Return ONLY valid JSON with these exact top-level keys:
-question_number, topic, page_numbers, parts, total_marks, verification_note, confidence.
+question_number, topic, page_numbers, diagram_scene_2d, parts, total_marks, verification_note, confidence.
 
 Each item in parts must contain:
 label, question_text, marks_available, mark_source, worked_steps,

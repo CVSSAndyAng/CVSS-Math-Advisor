@@ -3879,6 +3879,12 @@ def render_paper_question_solution(solution: PaperQuestionSolution) -> None:
         if solution.verification_note.strip():
             st.info(clean_guidance_text(solution.verification_note))
 
+        if getattr(solution, "diagram_scene_2d", None) is not None:
+            show_scene2d(
+                solution.diagram_scene_2d,
+                caption="Diagram used in the worked solution",
+            )
+
         for part in solution.parts:
             st.markdown(f"### {part.label}")
 
@@ -4183,6 +4189,150 @@ def append_word_mixed_math(paragraph, value: str, *, bold_prefix: str = "") -> N
     if cursor < len(text):
         append_plain(text[cursor:])
 
+
+def _scene_items(scene, name: str):
+    return list(getattr(scene, name, []) or [])
+
+
+def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: int = 54) -> bytes:
+    """Render a structured 2D maths scene to a clean PNG for app/Word use."""
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    x_min = float(getattr(scene, "x_min", -5) or -5)
+    x_max = float(getattr(scene, "x_max", 5) or 5)
+    y_min = float(getattr(scene, "y_min", -5) or -5)
+    y_max = float(getattr(scene, "y_max", 5) or 5)
+    if x_max <= x_min:
+        x_min, x_max = -5, 5
+    if y_max <= y_min:
+        y_min, y_max = -5, 5
+
+    plot_w = max(1, width - 2 * padding)
+    plot_h = max(1, height - 2 * padding)
+
+    def xy(x, y):
+        px = padding + (float(x) - x_min) / (x_max - x_min) * plot_w
+        py = height - padding - (float(y) - y_min) / (y_max - y_min) * plot_h
+        return (int(round(px)), int(round(py)))
+
+    # Light frame.
+    draw.rectangle([padding, padding, width-padding, height-padding], outline=(205,205,205), width=1)
+
+    if bool(getattr(scene, "show_axes", False)):
+        # Grid at sensible integer positions when range is moderate.
+        x0 = max(math.ceil(x_min), -30)
+        x1 = min(math.floor(x_max), 30)
+        y0 = max(math.ceil(y_min), -30)
+        y1 = min(math.floor(y_max), 30)
+        if x1-x0 <= 30 and y1-y0 <= 30:
+            for xv in range(x0, x1+1):
+                p1=xy(xv,y_min); p2=xy(xv,y_max)
+                draw.line([p1,p2], fill=(236,236,236), width=1)
+            for yv in range(y0, y1+1):
+                p1=xy(x_min,yv); p2=xy(x_max,yv)
+                draw.line([p1,p2], fill=(236,236,236), width=1)
+        if x_min <= 0 <= x_max:
+            draw.line([xy(0,y_min),xy(0,y_max)], fill=(70,70,70), width=2)
+        if y_min <= 0 <= y_max:
+            draw.line([xy(x_min,0),xy(x_max,0)], fill=(70,70,70), width=2)
+
+    points = {str(getattr(p,"id","")): p for p in _scene_items(scene,"points")}
+
+    # Curves / graphs.
+    for poly in _scene_items(scene,"polylines"):
+        samples = list(getattr(poly,"points",[]) or [])
+        coords=[]
+        for v in samples:
+            if isinstance(v,(list,tuple)) and len(v)>=2:
+                coords.append(xy(v[0],v[1]))
+        if len(coords)>=2:
+            draw.line(coords, fill=(35,35,35), width=3)
+            label=str(getattr(poly,"label","") or "")
+            if label:
+                mx,my=coords[len(coords)//2]
+                draw.text((mx+6,my-16),label,fill=(25,25,25),font=font)
+
+    # Circles.
+    sx = plot_w/(x_max-x_min)
+    sy = plot_h/(y_max-y_min)
+    for c in _scene_items(scene,"circles"):
+        cx=float(getattr(c,"center_x",0)); cy=float(getattr(c,"center_y",0)); r=float(getattr(c,"radius",1))
+        center=xy(cx,cy)
+        rx=max(2,int(round(r*sx))); ry=max(2,int(round(r*sy)))
+        box=[center[0]-rx,center[1]-ry,center[0]+rx,center[1]+ry]
+        draw.ellipse(box,outline=(35,35,35),width=3)
+        label=str(getattr(c,"label","") or "")
+        if label:
+            draw.text((center[0]+rx+5,center[1]-8),label,fill=(20,20,20),font=font)
+
+    # Segments.
+    for seg in _scene_items(scene,"segments"):
+        a=points.get(str(getattr(seg,"start",""))); b=points.get(str(getattr(seg,"end","")))
+        if not a or not b:
+            continue
+        pa=xy(getattr(a,"x",0),getattr(a,"y",0)); pb=xy(getattr(b,"x",0),getattr(b,"y",0))
+        draw.line([pa,pb],fill=(30,30,30),width=3)
+        label=str(getattr(seg,"label","") or "")
+        if label:
+            mx=(pa[0]+pb[0])//2; my=(pa[1]+pb[1])//2
+            draw.rectangle([mx-2,my-17,mx+max(20,6*len(label)),my-3],fill="white")
+            draw.text((mx,my-16),label,fill=(20,20,20),font=font)
+
+    # Points and labels.
+    for p in points.values():
+        px,py=xy(getattr(p,"x",0),getattr(p,"y",0))
+        draw.ellipse([px-4,py-4,px+4,py+4],fill=(20,20,20))
+        label=str(getattr(p,"label","") or "")
+        if label:
+            draw.text((px+7,py-14),label,fill=(20,20,20),font=font)
+
+    # Angle labels. Arms should normally already be represented by segments.
+    for ang in _scene_items(scene,"angles"):
+        vertex=points.get(str(getattr(ang,"vertex","")))
+        if not vertex:
+            continue
+        px,py=xy(getattr(vertex,"x",0),getattr(vertex,"y",0))
+        label=str(getattr(ang,"label","") or "")
+        if label:
+            draw.text((px+12,py+8),label,fill=(20,20,20),font=font)
+
+    buf=BytesIO()
+    img.save(buf,format="PNG")
+    return buf.getvalue()
+
+
+def show_scene2d(scene, *, caption: str = "") -> None:
+    if scene is None:
+        return
+    try:
+        png = render_scene2d_png(scene)
+        st.image(png, caption=caption or None, use_container_width=True)
+    except Exception as exc:
+        st.info("The diagram could not be rendered reliably. " + str(exc))
+
+
+def add_scene2d_to_word(doc: Document, scene, *, caption: str = "") -> None:
+    if scene is None:
+        return
+    try:
+        png = render_scene2d_png(scene, width=1100, height=650)
+        p=doc.add_paragraph()
+        p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+        run=p.add_run()
+        run.add_picture(BytesIO(png), width=Cm(13.5))
+        if caption:
+            cp=doc.add_paragraph(caption)
+            cp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            for rr in cp.runs:
+                rr.italic=True
+                rr.font.size=Pt(8.5)
+    except Exception:
+        # Do not break paper generation if a malformed scene slips through.
+        pass
+
+
 def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
     doc = Document()
     sec = doc.sections[0]
@@ -4218,7 +4368,13 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         append_word_mixed_math(p, q.stem_text)
         for eq in q.stem_equations:
             append_word_math(doc.add_paragraph(), eq)
-        if q.diagram_spec:
+        if getattr(q, "diagram_scene_2d", None) is not None:
+            add_scene2d_to_word(
+                doc,
+                q.diagram_scene_2d,
+                caption="Diagram not necessarily drawn to scale unless stated otherwise.",
+            )
+        elif q.diagram_spec:
             box = doc.add_paragraph()
             rr = box.add_run("Diagram / figure specification: ")
             rr.italic = True
@@ -4262,6 +4418,8 @@ def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
 
     for q in draft.questions:
         doc.add_heading(f"Question {q.question_number}", level=2)
+        if getattr(q, "diagram_scene_2d", None) is not None:
+            add_scene2d_to_word(doc, q.diagram_scene_2d, caption="Reference diagram")
         table = doc.add_table(rows=1, cols=4)
         table.style = "Table Grid"
         headers = ["Answer", "Marks", "Partial Marks", "Guidance"]
@@ -4337,7 +4495,12 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                 if eq_text:
                     render_mathio(eq_text)
 
-            if q.diagram_spec:
+            if getattr(q, "diagram_scene_2d", None) is not None:
+                show_scene2d(
+                    q.diagram_scene_2d,
+                    caption="Diagram for this question (schematic unless stated otherwise)",
+                )
+            elif q.diagram_spec:
                 with st.expander("Diagram / figure information", expanded=False):
                     render_mathio_mixed(q.diagram_spec)
 
@@ -4742,7 +4905,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · embedded mobile math keyboard")
+    st.caption("Build 2026-08-18 · generated diagrams in papers and solutions")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
