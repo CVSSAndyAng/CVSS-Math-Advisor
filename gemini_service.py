@@ -2012,13 +2012,9 @@ def generate_exam_paper_draft(
     model: str | None = None,
     client=None,
 ) -> ExamPaperDraft:
-    """Set a fresh syllabus-bounded paper using the uploaded reference as format authority."""
+    """Set a fresh syllabus-bounded paper, optionally using a reference paper for formatting."""
     reference_assets = reference_assets or []
-    if not reference_assets and not reference_text.strip():
-        raise GeminiTutorError(
-            "Upload a reference paper for this assessment type. The paper setter does not guess a format.",
-            category="input",
-        )
+    has_reference = bool(reference_assets or reference_text.strip())
     if not topics and not syllabus_notes.strip():
         raise GeminiTutorError("Choose at least one syllabus topic/chapter before setting the paper.", category="input")
 
@@ -2029,14 +2025,26 @@ def generate_exam_paper_draft(
         if include_marking_scheme
         else "Still solve every part internally for correctness, but marking_points may be empty."
     )
+    reference_mode_note = (
+        "A reference paper IS supplied; use it for format only."
+        if has_reference
+        else "NO reference paper is supplied; use built-in Singapore secondary Mathematics assessment conventions."
+    )
 
     prompt = f"""
 You are setting an original Singapore secondary Mathematics assessment paper.
 
+REFERENCE MODE
+{reference_mode_note}
+
 NON-NEGOTIABLE PAPER-SETTER RULES
-1. The UPLOADED REFERENCE PAPER is the format authority. Mirror its section order,
-   numbering style, marks placement, working-space expectations, command-word register,
-   and difficulty gradient. Do not copy its questions, contexts, values or answers.
+1. FORMAT AUTHORITY:
+   - If a reference paper is supplied, use it only as the format authority: mirror its section order,
+     numbering style, marks placement, working-space expectations, command-word register,
+     and difficulty gradient. Do not copy its questions, contexts, values or answers.
+   - If no reference paper is supplied, use clean Singapore secondary Mathematics assessment conventions:
+     logical question numbering, sensible subparts, marks shown at part/question endings, appropriate
+     progression from routine to more demanding questions, and enough working space for the stated duration.
 2. Use ONLY the syllabus scope explicitly supplied below. Do not introduce an untaught technique.
 3. Total marks must equal EXACTLY {total_marks}. Use exactly {number_of_questions} main questions.
 4. Use Singapore/MOE mathematical notation and British English.
@@ -2079,8 +2087,8 @@ NON-NEGOTIABLE PAPER-SETTER RULES
 12. Marking points are a suggested Cambridge-style teacher scheme: M1 method, A1 accuracy,
     B1 independent result/fact, E1 explanation. Partial-mark points for each part must sum to
     that part's marks. Do not invent official examiner tolerances.
-13. Do not silently repair a bad reference-paper mark total. Instead note it in verification_notes
-    and still make THIS newly generated paper total exactly {total_marks} marks.
+13. If a reference paper is supplied and its mark total appears inconsistent, note that in verification_notes.
+    In all cases, make THIS newly generated paper total exactly {total_marks} marks.
 
 SELECTED TRACK / SYLLABUS
 {track_label}
@@ -2095,11 +2103,11 @@ Assessment type: {assessment_type}
 Duration: {duration_minutes} minutes
 Total marks: {total_marks}
 Main questions: {number_of_questions}
-School: {school_name or '[Infer from reference if visible]'}
-Requested title: {paper_title or '[Create a suitable title matching the reference]'}
+School: {school_name or '[Leave generic if not supplied]'}
+Requested title: {paper_title or '[Create a suitable title for the selected assessment]'}
 
-REFERENCE PAPER EXTRACTED TEXT
-{reference_text[:50000] if reference_text.strip() else '[Reference supplied as attachment only]'}
+REFERENCE PAPER
+{reference_text[:50000] if reference_text.strip() else '[No reference paper supplied — use built-in Singapore assessment conventions]'}
 
 OUTPUT-SIZE CONTRACT
 - Return compact JSON. Do not repeat the question text in solution_steps or marking_points.
@@ -2118,7 +2126,7 @@ Before returning JSON, audit:
 - topic distribution sums to {total_marks};
 - AO distribution sums to {total_marks};
 - no question is outside the stated topics/chapters;
-- difficulty progression follows the reference paper rather than an invented ratio.
+- difficulty progression is appropriate for the assessment; if a reference paper is supplied, follow its progression.
 
 Return structured JSON only.
 """.strip()
@@ -2834,21 +2842,7 @@ def generate_guided_solution(
 
     The question is independently verified first. The returned object contains the
     complete verified path, but the Streamlit UI reveals it progressively.
-    
-
-STRICT TEXT / MATH DISPLAY CHANNELS:
-- GuidedStep.explanation must contain ordinary English prose only.
-- GuidedStep.equations must contain every standalone mathematical expression, equation, angle statement, substitution and calculation.
-- Never encode an English sentence as LaTeX or mathematical notation.
-- Example explanation: Measure angle QRS from the constructed figure using a protractor.
-- Example equations entry: \\angle QRS \\approx 122.6^{\\circ}
-
-
-MATHIO DISPLAY GUARANTEE:
-- Never place raw LaTeX/MathIO source visibly inside an English explanation.
-- Put standalone equations such as \angle QRS = \arctan(...) in the equations array.
-- If an explanation needs mathematics inline, keep the prose grammatical and keep the mathematical fragment concise.
-"""
+    """
     question_assets = question_assets or []
     if not question_text.strip() and not question_assets:
         raise GeminiTutorError("Provide the question as text or an upload.", category="input")

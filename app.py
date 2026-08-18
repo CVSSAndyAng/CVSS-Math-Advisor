@@ -5737,13 +5737,13 @@ with setter_tab:
                 key="setter_include_scheme",
             )
 
-        st.markdown("#### 3 · Reference format paper (required)")
+        st.markdown("#### 3 · Reference format paper (optional)")
         setter_reference = st.file_uploader(
-            "Upload a past paper of the SAME assessment type",
+            "Optional: upload a past paper of the same assessment type",
             type=["pdf", "docx", "doc"],
             accept_multiple_files=False,
             key="setter_reference_upload",
-            help="This paper is used for format, section structure, mark placement and difficulty gradient only. Questions are not copied.",
+            help=("Optional. If supplied, this paper guides section structure, numbering, mark placement and difficulty gradient. "      "If omitted, Math Advisor uses the selected syllabus, assessment settings and built-in Singapore paper conventions."),
         )
 
         reference_ready = False
@@ -5761,7 +5761,12 @@ with setter_tab:
                 st.error(str(exc))
 
         scope_ready = bool(setter_topics or setter_syllabus_notes.strip())
-        can_generate = reference_ready and scope_ready
+        can_generate = scope_ready
+        if setter_reference is None:
+            st.caption(
+                "No reference paper selected. Math Advisor will use the chosen syllabus, assessment type, "
+                "marks, duration and built-in Singapore assessment conventions."
+            )
 
         if st.button(
             "Generate assessment paper",
@@ -5773,7 +5778,12 @@ with setter_tab:
             st.session_state.setter_error = ""
             st.session_state.setter_draft = None
             try:
-                with st.spinner("Reading the reference format, setting questions and auditing mark totals..."):
+                spinner_text = (
+                    "Reading the optional reference format, setting questions and auditing mark totals..."
+                    if reference_ready
+                    else "Setting questions from the selected syllabus and assessment settings..."
+                )
+                with st.spinner(spinner_text):
                     draft = generate_exam_paper_draft(
                         track_label=setter_track_label,
                         assessment_type=setter_assessment,
