@@ -1923,6 +1923,77 @@ def _validate_practice_question_completeness(question: TargetedPracticeQuestion)
 
 
 
+
+def _setter_scene_point_labels(scene) -> set[str]:
+    return {
+        str(getattr(p, "label", "") or getattr(p, "id", "")).strip()
+        for p in (getattr(scene, "points", []) or [])
+        if str(getattr(p, "label", "") or getattr(p, "id", "")).strip()
+    }
+
+
+def _setter_scene_has_segment(scene, u: str, v: str) -> bool:
+    points = {
+        str(getattr(p, "id", "")): str(getattr(p, "label", "") or getattr(p, "id", "")).strip()
+        for p in (getattr(scene, "points", []) or [])
+    }
+    for seg in (getattr(scene, "segments", []) or []):
+        a=points.get(str(getattr(seg,"start","")),str(getattr(seg,"start","")))
+        b=points.get(str(getattr(seg,"end","")),str(getattr(seg,"end","")))
+        if {a,b}=={u,v}:
+            return True
+    return False
+
+
+def audit_setter_diagrams(draft: ExamPaperDraft) -> list[str]:
+    """Reject obviously mismatched generated diagrams before the teacher sees them."""
+    issues=[]
+    for q in draft.questions:
+        text=" ".join(
+            [q.stem_text] + list(q.stem_equations)
+            + [p.prompt_text for p in q.parts]
+            + [eq for p in q.parts for eq in p.equations]
+        )
+        lower=text.lower()
+        scene=q.diagram_scene_2d
+
+        # Any graph question with y= must at least have a 2D axes scene.
+        if re.search(r"\by\s*=",text,re.I):
+            if scene is None or not bool(getattr(scene,"show_axes",False)):
+                issues.append(f"Question {q.question_number}: graph/function question has no axes scene")
+
+        if "circle" in lower:
+            if scene is None or not (getattr(scene,"circles",[]) or []):
+                issues.append(f"Question {q.question_number}: circle question has no circle")
+                continue
+
+        if scene is None:
+            continue
+
+        labels=_setter_scene_point_labels(scene)
+        named=set()
+        for m in re.finditer(r"\bpoints?\s+([A-Z](?:\s*,\s*[A-Z])*(?:\s*,?\s*and\s+[A-Z])?)",text):
+            named.update(re.findall(r"\b[A-Z]\b",m.group(1)))
+        for m in re.finditer(r"\bpoint\s+([A-Z])\b",text):
+            named.add(m.group(1))
+        for m in re.finditer(r"\bchords?\s+([A-Z]{2})(?:\s+and\s+([A-Z]{2}))?",text):
+            for chord in [m.group(1),m.group(2)]:
+                if chord:
+                    named.update(chord)
+                    if not _setter_scene_has_segment(scene,chord[0],chord[1]):
+                        issues.append(f"Question {q.question_number}: chord {chord} missing from diagram")
+        missing=sorted(x for x in named if x not in labels)
+        if missing:
+            issues.append(f"Question {q.question_number}: diagram missing point(s) {', '.join(missing)}")
+
+        tang=re.search(r"\b([A-Z]{3})\s+is\s+a\s+tangent\b.*?\bat\s+(?:the\s+)?point\s+([A-Z])",text,re.I)
+        if tang:
+            for ch in tang.group(1):
+                if ch not in labels:
+                    issues.append(f"Question {q.question_number}: tangent line point {ch} missing")
+    return issues
+
+
 def generate_exam_paper_draft(
     *,
     track_label: str,
@@ -1978,15 +2049,18 @@ NON-NEGOTIABLE PAPER-SETTER RULES
 10. DIAGRAM REQUIREMENT:
     - If a question requires a 2D geometry diagram, coordinate axes, function graph, number line, construction, or other 2D visual,
       populate diagram_scene_2d with a complete drawable scene. Do not return only a prose diagram_spec.
-    - For a function-graph question, put the exact function in the equations field and provide sensible axes/bounds in diagram_scene_2d.
-      Do NOT output hundreds of sampled polyline points. The app plots standard functions deterministically from the equation.
+    - For a function-graph question, put EVERY function/line to be drawn in the equations field as an explicit y = ... expression,
+      and provide sensible axes/bounds in diagram_scene_2d. Do NOT output sampled polyline points.
+      The app uses a deterministic GeoGebra-style local graph engine to plot the exact equations.
     - If a question requires a 3D solid, prism, pyramid, cone, cylinder, sphere, cuboid or spatial geometry,
       populate diagram_scene_3d using vertices/edges/faces and/or the available solid primitives.
     - Include every point/line/circle/curve/angle label that the student needs.
     - For graph or coordinate questions set show_axes=true and choose sensible x/y bounds.
     - For geometry diagrams, reproduce the mathematical relationships in the question: incidence, collinearity,
       parallel/perpendicular lines, tangent points, chords, radii, equal lengths and angle locations. Never invent a generic polygon.
-    - Circle-geometry questions MUST include the actual circle plus the tangent/chords/radii required by the wording.
+    - Circle-geometry questions MUST include the actual circle plus every tangent/chord/radius named in the wording.
+      If chords are stated to intersect at G, the coordinates of G must be their actual intersection.
+      If ABC is tangent at B, A, B and C must be collinear on the tangent and B must lie on the circle.
     - For 3D questions use diagram_scene_3d rather than flattening the object into an arbitrary 2D polygon.
     - If the question names a cone, cylinder or sphere, include the corresponding primitive.
     - For a downward-pointing cone on the y-axis, set direction="negative".
@@ -1997,6 +2071,8 @@ NON-NEGOTIABLE PAPER-SETTER RULES
     - Put formulas, equations, expressions, coordinates, powers, roots, fractions, inequalities,
       function definitions, units attached to symbolic quantities, and symbolic answers in the equations arrays.
     - final_answer_mathio contains the symbolic final answer.
+    - For vectors, use standard equation-field notation such as \overrightarrow{OA}=6a.
+      Never spell source commands as ordinary words such as overrightarrow, quad, sqrt or frac.
     - Do not place raw LaTeX commands inside prose fields.
     This is required so the web app renders mathematics with MathIO and Word exports create native editable equations.
 11. {scheme_rule}
@@ -2137,9 +2213,13 @@ Return structured JSON only.
         return q_total, issues
 
     _, issues = audit_marks(result)
+    diagram_issues = audit_setter_diagrams(result)
+    issues.extend(diagram_issues)
     if issues:
         correction = (
-            "Correct ONLY the structural/mark-allocation problems below. Preserve valid questions, wording and numbering. "
+            "Correct ONLY the structural, mark-allocation, or diagram-consistency problems below. "
+            "Preserve valid questions, wording and numbering. For each diagram issue, rebuild the scene so it exactly "
+            "matches the named points, circles, tangents, chords, intersections, functions and solids in the question. "
             "Return the complete corrected JSON object.\n- " + "\n- ".join(issues)
         )
         try:
@@ -2147,6 +2227,7 @@ Return structured JSON only.
         except Exception as exc:
             raise _translate_exception(exc) from exc
         _, issues = audit_marks(result)
+        issues.extend(audit_setter_diagrams(result))
 
     if issues:
         raise GeminiTutorError(

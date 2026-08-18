@@ -4096,13 +4096,51 @@ def _balanced_group(src: str, start: int) -> tuple[str, int] | None:
     return None
 
 
+
+def _normalize_word_math_source(source: str) -> str:
+    """Normalize generated math source before converting it to Word Equation Editor."""
+    text = str(source or "").strip()
+
+    # Repair common missing-leading-slash model output.
+    text = re.sub(r"(?<!\\)\boverrightarrow\s*\{", r"\\overrightarrow{", text)
+    text = re.sub(r"(?<!\\)\bvec\s*\{", r"\\vec{", text)
+    text = re.sub(r"(?<!\\)\bquad\b", r"\\quad", text)
+    text = re.sub(r"(?<!\\)\bqquad\b", r"\\qquad", text)
+    text = re.sub(r"(?<!\\)\bcdot\b", r"\\cdot", text)
+    text = re.sub(r"(?<!\\)\btimes\b", r"\\times", text)
+
+    # Layout commands should become spacing, never visible command names.
+    text = text.replace(r"\qquad", "    ")
+    text = text.replace(r"\quad", "  ")
+    text = text.replace(r"\;", " ")
+    text = text.replace(r"\:", " ")
+    text = text.replace(r"\,", " ")
+    text = text.replace(r"\!", "")
+
+    replacements = {
+        r"\cdot": "·",
+        r"\times": "×",
+        r"\pm": "±",
+        r"\leq": "≤",
+        r"\geq": "≥",
+        r"\neq": "≠",
+        r"\parallel": "∥",
+        r"\perp": "⊥",
+        r"\infty": "∞",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return re.sub(r"[ \t]{3,}", "  ", text).strip()
+
+
 def _append_omml_expression(parent, source: str) -> None:
     """Append common school mathematics as structured, editable OMML.
 
     Supports nested fractions, roots, superscripts/subscripts and ordinary symbols.
     Unknown constructs remain editable Word-math text rather than raw body text.
     """
-    src = _latex_display_text(source)
+    src = _normalize_word_math_source(_latex_display_text(source))
     i = 0
     plain = []
 
@@ -4127,6 +4165,32 @@ def _append_omml_expression(parent, source: str) -> None:
                     parent.append(frac)
                     i = g2[1]
                     continue
+
+        # Vector arrow / over-arrow as a native Word math accent.
+        vector_cmd = None
+        cmd_len = 0
+        if src.startswith(r"\overrightarrow", i):
+            vector_cmd = r"\overrightarrow"
+            cmd_len = len(vector_cmd)
+        elif src.startswith(r"\vec", i):
+            vector_cmd = r"\vec"
+            cmd_len = len(vector_cmd)
+
+        if vector_cmd:
+            g = _balanced_group(src, i + cmd_len)
+            if g:
+                flush_plain()
+                accent = OxmlElement("m:acc")
+                acc_pr = OxmlElement("m:accPr")
+                char = OxmlElement("m:chr")
+                char.set(qn("m:val"), "→")
+                acc_pr.append(char)
+                elem = OxmlElement("m:e")
+                _append_omml_expression(elem, g[0])
+                accent.extend([acc_pr, elem])
+                parent.append(accent)
+                i = g[1]
+                continue
 
         if src.startswith(r"\sqrt", i):
             g = _balanced_group(src, i + 5)
@@ -4176,11 +4240,27 @@ def _append_omml_expression(parent, source: str) -> None:
             i += command_match.end()
             continue
 
-        # Strip a remaining command slash while keeping the command name editable.
+        # Remaining commands: convert known symbols and drop layout-only commands.
+        # Never expose source words such as "quad" in the generated paper.
         if src[i] == "\\":
             command = re.match(r"\\([A-Za-z]+)", src[i:])
             if command:
-                plain.append(command.group(1))
+                name = command.group(1)
+                symbol_map = {
+                    "theta": "θ", "alpha": "α", "beta": "β", "gamma": "γ",
+                    "delta": "δ", "pi": "π", "angle": "∠",
+                    "rightarrow": "→", "leftarrow": "←",
+                }
+                presentation_only = {
+                    "quad", "qquad", "textstyle", "displaystyle",
+                    "left", "right", "mathrm", "mathbf", "mathit",
+                }
+                if name in symbol_map:
+                    plain.append(symbol_map[name])
+                elif name in presentation_only:
+                    pass
+                else:
+                    plain.append(name)
                 i += command.end()
                 continue
 
@@ -4222,7 +4302,7 @@ def _append_native_integral(paragraph, source: str) -> bool:
 
 def append_word_math(paragraph, latex: str) -> None:
     """Insert an editable Microsoft Word Equation Editor object. DOCX stores these internally as OMML."""
-    source = _normalize_integral_source(str(latex or "").strip())
+    source = _normalize_word_math_source(_normalize_integral_source(str(latex or "").strip()))
     if not source:
         return
     if source.startswith(r"\int") and _append_native_integral(paragraph, source):
@@ -4244,6 +4324,9 @@ _WORD_MATH_FRAGMENT_RE = re.compile(
         \\sqrt\{[^{}]+\}
         |
         \\(?:pi|theta|alpha|beta|gamma|delta)\b
+        |
+        \\?(?:overrightarrow|vec)\s*\{[A-Za-z0-9]+\}
+        (?:\s*(?:=|≤|≥|<|>)\s*[^,.;\n]+)?
         |
         \\(?:sin|cos|tan|log|ln)\b(?:\s*\([^)]*\)|\s*\{[^{}]*\})?
         |
@@ -4334,11 +4417,37 @@ def _scene_items(scene, name: str):
     return list(getattr(scene, name, []) or [])
 
 
+
+def _diagram_font(size: int = 16):
+    """Use Times New Roman for diagram labels; fall back to a metrically similar serif font."""
+    candidates = [
+        "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/times.ttf",
+        "/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+    ]
+    for path in candidates:
+        try:
+            if Path(path).exists():
+                return ImageFont.truetype(path, size=size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _diagram_label_font_for_canvas(width: int) -> object:
+    # Approximate Times New Roman 11 pt on the generated raster.
+    # Larger Word-export canvas gets proportionally larger raster text.
+    px = 17 if width <= 980 else 20
+    return _diagram_font(px)
+
+
 def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: int = 54) -> bytes:
     """Render a structured 2D maths scene to a clean PNG for app/Word use."""
     img = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
+    font = _diagram_label_font_for_canvas(width)
 
     x_min = float(getattr(scene, "x_min", -5) or -5)
     x_max = float(getattr(scene, "x_max", 5) or 5)
@@ -4469,71 +4578,212 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
 def _compile_generated_function(expression: str):
     text = str(expression or "").replace("−","-").replace("×","*").replace("÷","/")
     text = text.replace(r"\left","").replace(r"\right","").replace(r"\pi","pi").replace("π","pi")
-    for fn in ("sin","cos","tan","sqrt","log"):
+    text = re.sub(r"\\sqrt\s*\(([^()]*)\)", r"sqrt(\1)", text)
+    text = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r"sqrt(\1)", text)
+    for fn in ("sin","cos","tan","sqrt","log","ln"):
         text = text.replace("\\"+fn,fn)
     text = text.replace("{","(").replace("}",")").replace("^","**")
-    text = re.sub(r"(?<=\d)(?=[A-Za-z(])","*",text)
-    text = re.sub(r"(?<=x)(?=\()","*",text)
-    text = re.sub(r"(?<=\))(?=[A-Za-z0-9(])","*",text)
+    # Convert common implicit multiplication while preserving function names.
+    text = re.sub(r"(?<=\d)(?=x\b)", "*", text)
+    text = re.sub(r"(?<=\d)(?=(?:sin|cos|tan|sqrt|log|ln)\b)", "*", text)
+    text = re.sub(r"(?<=x)(?=\()", "*", text)
+    text = re.sub(r"(?<=\))(?=[A-Za-z0-9(])", "*", text)
     if not re.fullmatch(r"[0-9A-Za-z_+\-*/().,\s*]+", text):
         return None
-    allowed={"sin":math.sin,"cos":math.cos,"tan":math.tan,"sqrt":math.sqrt,"log":math.log,"pi":math.pi}
+    allowed={
+        "sin":math.sin, "cos":math.cos, "tan":math.tan,
+        "sqrt":math.sqrt, "log":math.log, "ln":math.log, "pi":math.pi,
+    }
     def f(x):
         env=dict(allowed); env["x"]=float(x)
         return float(eval(text,{"__builtins__":{}},env))
     return f
 
-def ensure_question_function_curve(question):
-    scene=getattr(question,"diagram_scene_2d",None)
-    if scene is None or not bool(getattr(scene,"show_axes",False)):
-        return scene
-    if list(getattr(scene,"polylines",[]) or []):
-        return scene
 
-    parts=[str(getattr(question,"stem_text","") or "")]
-    parts += [str(x) for x in (getattr(question,"stem_equations",[]) or [])]
-    for p in (getattr(question,"parts",[]) or []):
-        parts.append(str(getattr(p,"prompt_text","") or ""))
-        parts += [str(x) for x in (getattr(p,"equations",[]) or [])]
-    source=" ".join(parts)
-    m=re.search(r"\by\s*=\s*([^.;\n]+)",source,re.I)
-    if not m:
-        return scene
-    expr=m.group(1).strip()
-    fn=_compile_generated_function(expr)
-    if fn is None:
+def _question_equation_sources(question) -> list[str]:
+    values = []
+    values.append(str(getattr(question, "stem_text", "") or ""))
+    values.extend(str(x) for x in (getattr(question, "stem_equations", []) or []))
+    for part in (getattr(question, "parts", []) or []):
+        values.append(str(getattr(part, "prompt_text", "") or ""))
+        values.extend(str(x) for x in (getattr(part, "equations", []) or []))
+    return [v for v in values if v.strip()]
+
+
+def _extract_y_functions(question) -> list[tuple[str, object]]:
+    """Extract every explicit y=f(x) definition from a question."""
+    found = []
+    seen = set()
+    for source in _question_equation_sources(question):
+        # split generously on punctuation but stop before prose clauses
+        for m in re.finditer(r"\by\s*=\s*([^.;\n]+)", source, flags=re.I):
+            expr = m.group(1).strip()
+            # trim common prose that follows a displayed equation
+            expr = re.split(r"\s+(?:and|where|for|with|intersect|meets|at)\s+", expr, maxsplit=1, flags=re.I)[0].strip()
+            key = re.sub(r"\s+","",expr)
+            if not expr or key in seen:
+                continue
+            fn = _compile_generated_function(expr)
+            if fn is not None:
+                seen.add(key)
+                found.append((expr, fn))
+    return found
+
+
+def ensure_question_function_curve(question):
+    """Replace axes-only/incomplete graph scenes with curves from the actual question equations."""
+    scene = getattr(question, "diagram_scene_2d", None)
+    functions = _extract_y_functions(question)
+    if scene is None or not functions:
         return scene
 
     try:
-        scene=scene.model_copy(deep=True)
+        scene = scene.model_copy(deep=True)
     except Exception:
-        scene=copy.deepcopy(scene)
+        scene = copy.deepcopy(scene)
 
+    scene.show_axes = True
     xmin=float(getattr(scene,"x_min",-5) or -5)
     xmax=float(getattr(scene,"x_max",5) or 5)
-    if xmax<=xmin: xmin,xmax=-5,5
-    chunks=[]; cur=[]; prev=None
-    for i in range(361):
-        x=xmin+(xmax-xmin)*i/360
-        try: y=fn(x)
-        except Exception: y=float("nan")
-        if not math.isfinite(y) or abs(y)>1e4:
-            if len(cur)>=2: chunks.append(cur)
-            cur=[]; prev=None; continue
-        if prev is not None and abs(y-prev)>30:
-            if len(cur)>=2: chunks.append(cur)
-            cur=[]
-        cur.append([x,y]); prev=y
-    if len(cur)>=2: chunks.append(cur)
-    if not chunks: return scene
+    if xmax <= xmin:
+        xmin, xmax = -5, 5
+        scene.x_min, scene.x_max = xmin, xmax
 
-    scene.polylines=[SimpleNamespace(id=f"auto_curve_{i}",points=c,label=("y = "+expr if i==1 else "")) for i,c in enumerate(chunks,1)]
-    vals=[p[1] for c in chunks for p in c if math.isfinite(p[1])]
-    if vals:
-        lo,hi=min(vals),max(vals)
-        scene.y_min=min(float(getattr(scene,"y_min",lo) or lo), math.floor(lo-0.5))
-        scene.y_max=max(float(getattr(scene,"y_max",hi) or hi), math.ceil(hi+0.5))
+    all_chunks = []
+    finite_y = []
+    for function_index, (expr, fn) in enumerate(functions, 1):
+        chunks=[]; cur=[]; prev=None
+        for i in range(721):
+            x=xmin+(xmax-xmin)*i/720
+            try:
+                y=fn(x)
+            except Exception:
+                y=float("nan")
+            if not math.isfinite(y) or abs(y)>1e4:
+                if len(cur)>=2: chunks.append(cur)
+                cur=[]; prev=None
+                continue
+            # break discontinuities, especially tangent/rational graphs
+            if prev is not None and abs(y-prev)>40:
+                if len(cur)>=2: chunks.append(cur)
+                cur=[]
+            cur.append([x,y]); prev=y
+            finite_y.append(y)
+        if len(cur)>=2: chunks.append(cur)
+        for chunk_index, chunk in enumerate(chunks, 1):
+            all_chunks.append(
+                SimpleNamespace(
+                    id=f"auto_curve_{function_index}_{chunk_index}",
+                    points=chunk,
+                    label=(f"y = {expr}" if chunk_index == 1 else ""),
+                )
+            )
+
+    if all_chunks:
+        # Authoritative: replace any model-supplied placeholder/bogus polylines.
+        scene.polylines = all_chunks
+
+    if finite_y:
+        finite_y = [v for v in finite_y if abs(v) < 1000]
+        if finite_y:
+            lo, hi=min(finite_y), max(finite_y)
+            margin=max(0.5,0.08*max(1.0,hi-lo))
+            scene.y_min=min(float(getattr(scene,"y_min",lo) or lo), math.floor(lo-margin))
+            scene.y_max=max(float(getattr(scene,"y_max",hi) or hi), math.ceil(hi+margin))
     return scene
+
+
+def _segment_distance_to_point(a, b, p) -> float:
+    ax,ay=a; bx,by=b; px,py=p
+    dx,dy=bx-ax,by-ay
+    denom=dx*dx+dy*dy
+    if denom <= 1e-12:
+        return math.hypot(px-ax,py-ay)
+    t=max(0.0,min(1.0,((px-ax)*dx+(py-ay)*dy)/denom))
+    qx,qy=ax+t*dx,ay+t*dy
+    return math.hypot(px-qx,py-qy)
+
+
+def validate_question_scene_2d(question, scene) -> list[str]:
+    """Heuristic structural validation so diagrams match the wording."""
+    if scene is None:
+        return []
+    text=" ".join(_question_equation_sources(question))
+    lower=text.lower()
+    issues=[]
+    pts={str(getattr(p,"label","") or getattr(p,"id","")).strip():p for p in _scene_items(scene,"points")}
+    circles=list(_scene_items(scene,"circles"))
+    segs=list(_scene_items(scene,"segments"))
+
+    if "circle" in lower and not circles:
+        issues.append("question mentions a circle but the diagram has no circle")
+
+    # Explicit point lists: Points D, E, and F ... / point B
+    named=set()
+    for m in re.finditer(r"\bpoints?\s+([A-Z](?:\s*,\s*[A-Z])*(?:\s*,?\s*and\s+[A-Z])?)", text):
+        named.update(re.findall(r"\b[A-Z]\b",m.group(1)))
+    for m in re.finditer(r"\bpoint\s+([A-Z])\b", text):
+        named.add(m.group(1))
+    for m in re.finditer(r"\b(?:chord|line|segment)\s+([A-Z]{2})\b", text):
+        named.update(m.group(1))
+    for m in re.finditer(r"\bintersect(?:s|ed)?\s+at\s+([A-Z])\b", text, flags=re.I):
+        named.add(m.group(1).upper())
+    missing=sorted(x for x in named if x not in pts)
+    if missing:
+        issues.append("missing labelled point(s): "+", ".join(missing))
+
+    # Chords XY must actually be drawn between X and Y.
+    def has_segment(u,v):
+        for s in segs:
+            a=str(getattr(s,"start","")); b=str(getattr(s,"end",""))
+            if {a,b}=={u,v}:
+                return True
+            pa=pts.get(u); pb=pts.get(v)
+            sa=pts.get(a); sb=pts.get(b)
+            if pa and pb and sa and sb:
+                if {str(getattr(sa,"label","")),str(getattr(sb,"label",""))}=={u,v}:
+                    return True
+        return False
+
+    for m in re.finditer(r"\bchords?\s+([A-Z]{2})(?:\s+and\s+([A-Z]{2}))?", text):
+        for chord in [m.group(1),m.group(2)]:
+            if chord and not has_segment(chord[0],chord[1]):
+                issues.append(f"missing chord {chord}")
+
+    # Tangent ABC at B should contain points A-B-C and B should lie on circle.
+    tang = re.search(r"\b([A-Z]{3})\s+is\s+a\s+tangent\b.*?\bat\s+(?:the\s+)?point\s+([A-Z])", text, flags=re.I)
+    if tang:
+        letters=tang.group(1)
+        touch=tang.group(2).upper()
+        for ch in letters:
+            if ch not in pts:
+                issues.append(f"tangent point {ch} is missing")
+        if touch in pts and circles:
+            p=pts[touch]
+            ok=False
+            for c in circles:
+                d=math.hypot(float(p.x)-float(c.center_x),float(p.y)-float(c.center_y))
+                if abs(d-float(c.radius)) <= max(0.08,0.04*float(c.radius)):
+                    ok=True
+            if not ok:
+                issues.append(f"tangent contact {touch} is not on the circle")
+
+    # Intersections: if chords XY and UV intersect at G, G should lie on both.
+    inter=re.search(r"\bchords?\s+([A-Z]{2})\s+and\s+([A-Z]{2})\s+intersect\s+at\s+([A-Z])", text, flags=re.I)
+    if inter:
+        c1,c2,g=inter.group(1),inter.group(2),inter.group(3).upper()
+        if all(ch in pts for ch in c1+c2+g):
+            gp=(float(pts[g].x),float(pts[g].y))
+            scale=max(1.0, float(getattr(scene,"x_max",5))-float(getattr(scene,"x_min",-5)))
+            tol=0.035*scale
+            for chord in (c1,c2):
+                a=(float(pts[chord[0]].x),float(pts[chord[0]].y))
+                b=(float(pts[chord[1]].x),float(pts[chord[1]].y))
+                if _segment_distance_to_point(a,b,gp)>tol:
+                    issues.append(f"intersection point {g} is not on chord {chord}")
+    return issues
+
+
 
 def show_scene2d(scene, *, caption: str = "") -> None:
     if scene is None:
@@ -4558,8 +4808,12 @@ def add_scene2d_to_word(doc: Document, scene, *, caption: str = "") -> None:
             cp=doc.add_paragraph(caption)
             cp.alignment=WD_ALIGN_PARAGRAPH.CENTER
             for rr in cp.runs:
-                rr.italic=True
-                rr.font.size=Pt(8.5)
+                rr.italic = True
+                rr.font.name = "Times New Roman"
+                rr.font.size = Pt(11)
+                rr._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+                rr._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
+                rr._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
     except Exception:
         # Do not break paper generation if a malformed scene slips through.
         pass
@@ -4677,7 +4931,7 @@ def render_scene3d_png(scene, *, width: int=960, height: int=620, padding: int=6
     """Render a clear isometric 3D exam schematic to PNG."""
     img=Image.new("RGB",(width,height),"white")
     draw=ImageDraw.Draw(img)
-    font=ImageFont.load_default()
+    font=_diagram_label_font_for_canvas(width)
     segs,verts=_scene3d_wire_segments(scene)
 
     projected=[]
@@ -4736,7 +4990,13 @@ def add_scene3d_to_word(doc: Document, scene, *, caption: str="") -> None:
         p.add_run().add_picture(BytesIO(png),width=Cm(13.5))
         if caption:
             cp=doc.add_paragraph(caption); cp.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            for rr in cp.runs: rr.italic=True; rr.font.size=Pt(8.5)
+            for rr in cp.runs:
+                rr.italic = True
+                rr.font.name = "Times New Roman"
+                rr.font.size = Pt(11)
+                rr._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+                rr._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
+                rr._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
     except Exception:
         pass
 
@@ -4821,11 +5081,19 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         elif getattr(q, "diagram_scene_2d", None) is not None:
             figure_number += 1
             effective_scene_2d = ensure_question_function_curve(q)
-            add_scene2d_to_word(
-                doc,
-                effective_scene_2d,
-                caption=f"Figure {figure_number}",
-            )
+            scene_issues = validate_question_scene_2d(q, effective_scene_2d)
+            if not scene_issues:
+                add_scene2d_to_word(
+                    doc,
+                    effective_scene_2d,
+                    caption=f"Figure {figure_number}",
+                )
+            else:
+                note = doc.add_paragraph()
+                rr = note.add_run("Diagram omitted pending correction: " + "; ".join(scene_issues))
+                rr.italic = True
+                rr.font.name = "Times New Roman"
+                rr.font.size = Pt(11)
         elif q.diagram_spec:
             box = doc.add_paragraph()
             rr = box.add_run("Diagram / figure specification: ")
@@ -4964,10 +5232,17 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
             elif getattr(q, "diagram_scene_2d", None) is not None:
                 figure_number += 1
                 effective_scene_2d = ensure_question_function_curve(q)
-                show_scene2d(
-                    effective_scene_2d,
-                    caption=f"Figure {figure_number}",
-                )
+                scene_issues = validate_question_scene_2d(q, effective_scene_2d)
+                if scene_issues:
+                    st.warning(
+                        "Diagram withheld because it does not yet match the question: "
+                        + "; ".join(scene_issues)
+                    )
+                else:
+                    show_scene2d(
+                        effective_scene_2d,
+                        caption=f"Figure {figure_number}",
+                    )
             elif q.diagram_spec:
                 with st.expander("Diagram / figure information", expanded=False):
                     render_mathio_mixed(q.diagram_spec)
@@ -5373,7 +5648,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · stable math save + compact paper JSON")
+    st.caption("Build 2026-08-18 · native Word vector equations")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
