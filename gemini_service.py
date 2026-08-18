@@ -2187,51 +2187,257 @@ Return structured JSON only.
             ) from exc
         raise translated from exc
 
+    def _sync_marking_points(part: SetterPaperPart) -> None:
+        """Keep the suggested marking-point total consistent with the part marks."""
+        if not include_marking_scheme:
+            return
+
+        points = list(part.marking_points or [])
+        target = int(part.marks)
+
+        if not points:
+            # A concise generic point is preferable to failing the entire paper.
+            points = [
+                PaperMarkPoint(
+                    code=f"B{target}" if target > 1 else "B1",
+                    marks=target,
+                    description="Award for a complete correct response.",
+                    allow_follow_through=False,
+                )
+            ]
+            part.marking_points = points
+            return
+
+        current = sum(int(mp.marks) for mp in points)
+        delta = target - current
+
+        # Adjust existing marking points gently before adding/removing anything.
+        if delta > 0:
+            for mp in reversed(points):
+                room = max(0, 10 - int(mp.marks))
+                if room <= 0:
+                    continue
+                add = min(room, delta)
+                mp.marks += add
+                delta -= add
+                if delta == 0:
+                    break
+            while delta > 0:
+                add = min(10, delta)
+                points.append(
+                    PaperMarkPoint(
+                        code=f"B{add}" if add > 1 else "B1",
+                        marks=add,
+                        description="Additional credit for the completed mathematical requirement.",
+                        allow_follow_through=False,
+                    )
+                )
+                delta -= add
+        elif delta < 0:
+            remove = -delta
+            for mp in reversed(points):
+                reducible = min(int(mp.marks), remove)
+                mp.marks -= reducible
+                remove -= reducible
+                if remove == 0:
+                    break
+            points = [mp for mp in points if int(mp.marks) > 0]
+
+        # Final safety correction.
+        current = sum(int(mp.marks) for mp in points)
+        if current != target:
+            gap = target - current
+            if points and 0 <= int(points[-1].marks) + gap <= 10:
+                points[-1].marks += gap
+            elif gap > 0:
+                points.append(
+                    PaperMarkPoint(
+                        code=f"B{gap}" if gap > 1 else "B1",
+                        marks=gap,
+                        description="Additional credit for the completed mathematical requirement.",
+                        allow_follow_through=False,
+                    )
+                )
+        part.marking_points = points
+
+
+    def reconcile_marks(draft: ExamPaperDraft) -> list[str]:
+        """Reconcile small/medium mark-allocation inconsistencies locally.
+
+        The requested paper total is authoritative. Question totals follow their
+        subparts, and the distribution across questions may flex to reach the target.
+        """
+        notes: list[str] = []
+
+        # First make each question total agree with its own parts.
+        for q in draft.questions:
+            if not q.parts:
+                continue
+            part_total = sum(int(p.marks) for p in q.parts)
+            if int(q.marks) != part_total:
+                notes.append(
+                    f"Question {q.question_number}: adjusted question total "
+                    f"from {q.marks} to {part_total} to match its parts."
+                )
+                q.marks = part_total
+
+        # Now redistribute the difference so the overall paper reaches the
+        # teacher-requested total. This is intentionally flexible.
+        current_total = sum(int(q.marks) for q in draft.questions)
+        delta = int(total_marks) - current_total
+
+        if delta != 0:
+            direction = 1 if delta > 0 else -1
+            remaining = abs(delta)
+
+            # Prefer standard/stretch questions and later parts, where one extra
+            # method/accuracy mark is least disruptive to the paper structure.
+            difficulty_rank = {"stretch": 0, "standard": 1, "routine": 2}
+            ordered_questions = sorted(
+                draft.questions,
+                key=lambda q: (
+                    difficulty_rank.get(str(q.difficulty), 3),
+                    -int(re.sub(r"\D", "", str(q.question_number)) or 0),
+                ),
+            )
+
+            guard = 0
+            while remaining > 0 and guard < 1000:
+                guard += 1
+                changed = False
+                for q in ordered_questions:
+                    if remaining <= 0:
+                        break
+                    if not q.parts:
+                        continue
+
+                    for part in reversed(q.parts):
+                        if remaining <= 0:
+                            break
+
+                        if direction > 0:
+                            # Respect schema limits: part <=20, question <=30.
+                            if int(part.marks) >= 20 or int(q.marks) >= 30:
+                                continue
+                            part.marks += 1
+                            q.marks += 1
+                        else:
+                            # Keep every printed part worth at least one mark.
+                            if int(part.marks) <= 1 or int(q.marks) <= 1:
+                                continue
+                            part.marks -= 1
+                            q.marks -= 1
+
+                        remaining -= 1
+                        changed = True
+
+                if not changed:
+                    break
+
+            if remaining == 0:
+                notes.append(
+                    f"Redistributed {abs(delta)} mark(s) so the paper total is exactly {total_marks}."
+                )
+            else:
+                notes.append(
+                    f"Could not redistribute {remaining} of the required {abs(delta)} mark adjustment(s)."
+                )
+
+        # Keep marking schemes aligned with the final flexible part allocation.
+        for q in draft.questions:
+            for part in q.parts:
+                _sync_marking_points(part)
+
+        # Make summary total authoritative after reconciliation.
+        draft.total_marks = int(total_marks)
+        return notes
+
+
     def audit_marks(draft: ExamPaperDraft) -> tuple[int, list[str]]:
+        """Audit only issues that cannot safely be fixed by local mark reconciliation."""
         issues: list[str] = []
         q_total = 0
         seen: set[str] = set()
+
         for q in draft.questions:
             if q.question_number in seen:
                 issues.append(f"Duplicate question number {q.question_number}")
             seen.add(q.question_number)
-            part_total = sum(p.marks for p in q.parts)
-            if part_total != q.marks:
-                issues.append(f"Question {q.question_number}: part marks {part_total} != question marks {q.marks}")
+
+            if not q.parts:
+                issues.append(f"Question {q.question_number} has no question parts")
+                q_total += int(q.marks)
+                continue
+
+            part_total = sum(int(p.marks) for p in q.parts)
+            if part_total != int(q.marks):
+                issues.append(
+                    f"Question {q.question_number}: part marks {part_total} != question marks {q.marks}"
+                )
+
             if include_marking_scheme:
                 for p in q.parts:
-                    scheme_marks = sum(mp.marks for mp in p.marking_points)
-                    if scheme_marks != p.marks:
+                    scheme_marks = sum(int(mp.marks) for mp in p.marking_points)
+                    if scheme_marks != int(p.marks):
                         issues.append(
-                            f"Question {q.question_number}{p.label}: marking points {scheme_marks} != part marks {p.marks}"
+                            f"Question {q.question_number}{p.label}: "
+                            f"marking points {scheme_marks} != part marks {p.marks}"
                         )
-            q_total += q.marks
+
+            q_total += int(q.marks)
+
         if len(draft.questions) != number_of_questions:
-            issues.append(f"Generated {len(draft.questions)} questions instead of {number_of_questions}")
-        if q_total != total_marks:
-            issues.append(f"Question marks total {q_total} instead of {total_marks}")
+            issues.append(
+                f"Generated {len(draft.questions)} questions instead of {number_of_questions}"
+            )
+
+        if q_total != int(total_marks):
+            issues.append(
+                f"Question marks total {q_total} instead of {total_marks}"
+            )
+
         return q_total, issues
 
-    _, issues = audit_marks(result)
+
+    # Mark distribution is flexible. Reconcile it locally before asking Gemini
+    # to regenerate anything. Diagram/structural issues remain strict.
+    mark_notes = reconcile_marks(result)
+    _, mark_issues = audit_marks(result)
     diagram_issues = audit_setter_diagrams(result)
-    issues.extend(diagram_issues)
+
+    # Only send a regeneration request for issues that remain after automatic
+    # reconciliation, or for diagram/structural errors.
+    issues = mark_issues + diagram_issues
     if issues:
         correction = (
-            "Correct ONLY the structural, mark-allocation, or diagram-consistency problems below. "
-            "Preserve valid questions, wording and numbering. For each diagram issue, rebuild the scene so it exactly "
-            "matches the named points, circles, tangents, chords, intersections, functions and solids in the question. "
+            "Correct ONLY the remaining structural, mark-allocation, or diagram-consistency problems below. "
+            "The overall requested mark total is authoritative, but the distribution of marks between questions "
+            "and parts is flexible. Do not preserve an arbitrary per-question mark total if changing it by one or "
+            "two marks produces a better-balanced paper. Preserve valid questions, wording and numbering. "
+            "For each diagram issue, rebuild the scene so it exactly matches the named points, circles, tangents, "
+            "chords, intersections, functions and solids in the question. "
             "Return the complete corrected JSON object.\n- " + "\n- ".join(issues)
         )
         try:
             result = request(correction, attempts=3)
         except Exception as exc:
             raise _translate_exception(exc) from exc
-        _, issues = audit_marks(result)
-        issues.extend(audit_setter_diagrams(result))
+
+        mark_notes.extend(reconcile_marks(result))
+        _, mark_issues = audit_marks(result)
+        diagram_issues = audit_setter_diagrams(result)
+        issues = mark_issues + diagram_issues
+
+    # Keep a short teacher-facing record of automatic mark normalisation.
+    if mark_notes:
+        existing = list(result.verification_notes or [])
+        existing.extend(mark_notes[:4])
+        result.verification_notes = existing
 
     if issues:
         raise GeminiTutorError(
-            "The generated paper failed the mark-allocation audit: " + "; ".join(issues[:8]),
+            "The generated paper still has structural issues after automatic mark reconciliation: "
+            + "; ".join(issues[:8]),
             category="format",
         )
 

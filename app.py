@@ -5647,7 +5647,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Combined teacher workflow ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · Math Advisor combined teacher workflow")
+    st.caption("Build 2026-08-18 · flexible automatic mark allocation")
     st.markdown('<div class="omt-section-kicker">Teacher assessment tools</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Paper setter, solutions & marking scheme</div>', unsafe_allow_html=True)
     teacher_workflow_mode = st.radio(
