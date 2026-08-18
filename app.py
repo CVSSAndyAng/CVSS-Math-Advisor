@@ -461,7 +461,7 @@ MATHLIVE_VERSION = "0.110.0"  # Patched MathLive release used by the visual equa
 _EQUATION_EDITOR_HTML = """
 <div class="omt-math-editor">
   <div class="omt-editor-label"></div>
-  <div class="omt-editor-help">Type directly into each maths box. Use the quick equation tools or tap <b>Math keyboard</b> for the full mathematics keyboard.</div>
+  <div class="omt-editor-help">Type directly into each maths box. Use the quick equation tools or tap <b>Math keyboard</b>. The full keyboard opens directly below the maths box.</div>
   <div class="omt-math-toolbar" role="toolbar" aria-label="Math equation tools">
     <button type="button" data-insert="\\frac{#@}{#?}" title="Fraction">a⁄b</button>
     <button type="button" data-insert="\\sqrt{#0}" title="Square root">√</button>
@@ -481,6 +481,39 @@ _EQUATION_EDITOR_HTML = """
     <button type="button" class="omt-keyboard-toggle">⌨ Math keyboard</button>
   </div>
   <div class="omt-editor-rows"></div>
+
+  <div class="omt-full-keyboard" hidden aria-label="Full mathematics keyboard">
+    <div class="omt-keyboard-row">
+      <button type="button" data-kb="7">7</button><button type="button" data-kb="8">8</button><button type="button" data-kb="9">9</button>
+      <button type="button" data-kb="\\times">×</button><button type="button" data-kb="\\div">÷</button><button type="button" data-kb="\\frac{#@}{#?}">a⁄b</button>
+    </div>
+    <div class="omt-keyboard-row">
+      <button type="button" data-kb="4">4</button><button type="button" data-kb="5">5</button><button type="button" data-kb="6">6</button>
+      <button type="button" data-kb="+">+</button><button type="button" data-kb="-">−</button><button type="button" data-kb="\\sqrt{#0}">√</button>
+    </div>
+    <div class="omt-keyboard-row">
+      <button type="button" data-kb="1">1</button><button type="button" data-kb="2">2</button><button type="button" data-kb="3">3</button>
+      <button type="button" data-kb="=">=</button><button type="button" data-kb="#@^{#?}">xʸ</button><button type="button" data-kb="#@_{#?}">xₙ</button>
+    </div>
+    <div class="omt-keyboard-row">
+      <button type="button" data-kb="0">0</button><button type="button" data-kb=".">.</button><button type="button" data-kb="(">(</button>
+      <button type="button" data-kb=")">)</button><button type="button" data-kb="\\pi">π</button><button type="button" data-kb="\\theta">θ</button>
+    </div>
+    <div class="omt-keyboard-row">
+      <button type="button" data-kb="\\sin\\left(#0\\right)">sin</button><button type="button" data-kb="\\cos\\left(#0\\right)">cos</button>
+      <button type="button" data-kb="\\tan\\left(#0\\right)">tan</button><button type="button" data-kb="\\log_{#?}\\left(#0\\right)">log</button>
+      <button type="button" data-kb="\\ln\\left(#0\\right)">ln</button><button type="button" data-kb="^{\\circ}">°</button>
+    </div>
+    <div class="omt-keyboard-row">
+      <button type="button" data-kb="\\le">≤</button><button type="button" data-kb="\\ge">≥</button><button type="button" data-kb="\\ne">≠</button>
+      <button type="button" data-kb="\\pm">±</button><button type="button" data-kb="\\infty">∞</button><button type="button" class="omt-kb-backspace">⌫</button>
+    </div>
+    <div class="omt-keyboard-row">
+      <button type="button" data-kb="x">x</button><button type="button" data-kb="y">y</button><button type="button" data-kb="a">a</button>
+      <button type="button" data-kb="b">b</button><button type="button" data-kb="c">c</button><button type="button" class="omt-kb-close">Close</button>
+    </div>
+  </div>
+
   <div class="omt-editor-actions">
     <button type="button" class="omt-add-step">＋ Add step</button>
   </div>
@@ -561,6 +594,16 @@ body { --keyboard-zindex: 999999; }
     font-size: 1.18rem;
   }
 }
+
+.omt-full-keyboard{margin:.65rem 0 .75rem;padding:.55rem;border:1px solid rgba(128,128,128,.32);border-radius:.75rem;background:var(--st-background-color,#fff);box-shadow:0 6px 22px rgba(0,0,0,.08)}
+.omt-full-keyboard[hidden]{display:none!important}
+.omt-keyboard-row{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:.38rem;margin-bottom:.38rem}
+.omt-keyboard-row:last-child{margin-bottom:0}
+.omt-keyboard-row button{min-height:46px;border:1px solid rgba(128,128,128,.38);border-radius:.5rem;background:var(--st-secondary-background-color,#f6f7f9);color:var(--st-text-color,#222);font-size:1rem;cursor:pointer;touch-action:manipulation}
+@media (max-width:640px),(pointer:coarse){
+  .omt-full-keyboard{position:sticky;bottom:0;z-index:40;max-height:52vh;overflow-y:auto;overscroll-behavior:contain}
+  .omt-keyboard-row button{min-height:50px;font-size:1.05rem}
+}
 """
 
 _EQUATION_EDITOR_JS = f"""
@@ -589,6 +632,9 @@ export default async function(component) {{
   const status = parentElement.querySelector('.omt-editor-status');
   const toolbar = parentElement.querySelector('.omt-math-toolbar');
   const keyboardButton = parentElement.querySelector('.omt-keyboard-toggle');
+  const keyboardPanel = parentElement.querySelector('.omt-full-keyboard');
+  const keyboardClose = parentElement.querySelector('.omt-kb-close');
+  const keyboardBackspace = parentElement.querySelector('.omt-kb-backspace');
   label.textContent = data?.label || 'Student working';
 
   let module;
@@ -655,17 +701,23 @@ export default async function(component) {{
 
   const showKeyboard = () => {{
     const mf = currentField();
-    if (!mf || !vk) {{ status.textContent = 'Math keyboard unavailable. Reload and try again.'; return; }}
-    state.active = mf;
-    mf.focus();
-    try {{ vk.show(); }} catch (_) {{ try {{ vk.visible = true; }} catch (_) {{}} }}
+    if (!mf) {{ status.textContent='Tap a maths box first.'; return; }}
+    state.active = mf; mf.focus();
+    keyboardPanel.hidden = false;
+    keyboardButton.textContent = '⌨ Hide keyboard';
+    keyboardButton.setAttribute('aria-expanded','true');
     status.textContent = 'Math keyboard open';
   }};
 
   const hideKeyboard = () => {{
-    if (!vk) return;
-    try {{ vk.hide(); }} catch (_) {{ try {{ vk.visible = false; }} catch (_) {{}} }}
+    keyboardPanel.hidden = true;
+    keyboardButton.textContent = '⌨ Math keyboard';
+    keyboardButton.setAttribute('aria-expanded','false');
     status.textContent = 'Math keyboard hidden';
+  }};
+
+  const toggleKeyboard = () => {{
+    if (keyboardPanel.hidden) showKeyboard(); else hideKeyboard();
   }};
 
   const renderRows = () => {{
@@ -690,11 +742,11 @@ export default async function(component) {{
         state.active = mf;
         const coarse = globalThis.matchMedia && globalThis.matchMedia('(pointer: coarse)').matches;
         const narrow = globalThis.innerWidth <= 700;
-        if ((coarse || narrow) && vk) {{
-          setTimeout(() => {{
-            try {{ vk.show(); }} catch (_) {{ try {{ vk.visible = true; }} catch (_) {{}} }}
-            status.textContent = 'Math keyboard open';
-          }}, 80);
+        if ((coarse || narrow) && keyboardPanel.hidden) {{
+          keyboardPanel.hidden = false;
+          keyboardButton.textContent = '⌨ Hide keyboard';
+          keyboardButton.setAttribute('aria-expanded','true');
+          status.textContent = 'Math keyboard open';
         }}
       }});
       mf.addEventListener('input', scheduleEmit);
@@ -733,10 +785,26 @@ export default async function(component) {{
     }};
   }});
 
-  keyboardButton.onclick = () => {{
-    if (!vk) {{ status.textContent = 'Math keyboard unavailable. Reload and try again.'; return; }}
-    if (vk.visible) hideKeyboard(); else showKeyboard();
+  keyboardButton.onclick = toggleKeyboard;
+
+  parentElement.querySelectorAll('button[data-kb]').forEach(button => {{
+    button.onclick = () => {{
+      const mf = currentField(); if (!mf) return;
+      state.active = mf; mf.focus();
+      const latex = button.dataset.kb || '';
+      try {{ mf.insert(latex, {{ insertionMode:'replaceSelection', selectionMode:'placeholder' }}); }}
+      catch (_) {{ try {{ mf.executeCommand(['insert',latex]); }} catch (_) {{}} }}
+      scheduleEmit();
+    }};
+  }});
+
+  keyboardBackspace.onclick = () => {{
+    const mf=currentField(); if(!mf) return; mf.focus();
+    try {{ mf.executeCommand('deleteBackward'); }} catch(_) {{}}
+    scheduleEmit();
   }};
+
+  keyboardClose.onclick = hideKeyboard;
 
   addButton.onclick = () => {{
     if (state.payload.latex.length >= 20) {{ status.textContent = 'Maximum 20 working steps.'; return; }}
@@ -749,6 +817,8 @@ export default async function(component) {{
     if (mf) {{ state.active = mf; mf.focus(); }}
   }};
 
+  keyboardPanel.hidden = true;
+  keyboardButton.setAttribute('aria-expanded','false');
   renderRows();
 }}
 """
@@ -4672,7 +4742,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · mobile math keyboard + universal MathIO + Word Equation Editor")
+    st.caption("Build 2026-08-18 · embedded mobile math keyboard")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
