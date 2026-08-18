@@ -5607,7 +5607,7 @@ st.markdown(
     """
     <section class="omt-hero">
       <div class="omt-eyebrow">Singapore secondary mathematics</div>
-      <h1>Reasoning Tutor</h1>
+      <h1>Math Advisor</h1>
       <p>Understand the student's method, find the first reasoning break, advise the student clearly, then build mastery through adaptive practice.</p>
       <div class="omt-chip-row">
         <span class="omt-chip">✍️ Handwriting & iPad</span>
@@ -5620,11 +5620,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-ai_tab, setter_tab, paper_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
+ai_tab, setter_tab, practice_tab, own_tab, syllabus_tab, progress_tab = st.tabs(
     [
         "✨ Analyse",
         "🧑‍🏫 Paper setter",
-        "📝 Full paper",
         "🧠 Offline practice",
         "✎ Algebra check",
         "📚 Syllabus",
@@ -5646,394 +5645,414 @@ st.session_state.setdefault("setter_draft", None)
 st.session_state.setdefault("setter_error", "")
 st.session_state.setdefault("setter_reference_signature", "")
 
-# ---------- Teacher paper setter ----------
+# ---------- Combined teacher workflow ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · native Word vector equations")
-    st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
-    st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
-    st.write(
-        "Choose the syllabus scope, assessment type, marks and duration, then upload a past paper that defines the format. "
-        "The generator follows that reference structure while writing fresh questions."
-    )
-    st.info(
-        "The reference paper is required: format, numbering, mark placement and difficulty gradient are not guessed. "
-        "Generated marking schemes are teacher drafts, not official SEAB/MOE schemes."
-    )
-
-    left, right = st.columns([1, 1], gap="large")
-    with left:
-        st.markdown("#### 1 · Assessment settings")
-        setter_track_label = st.selectbox(
-            "Selected level / syllabus",
-            options=list(APP_TRACKS.keys()),
-            index=list(APP_TRACKS.keys()).index(track_label) if track_label in APP_TRACKS else 0,
-            key="setter_track_label",
-            help="Choose the syllabus for this assessment independently of the main tutor sidebar.",
-        )
-        setter_info = selected_track_info(setter_track_label)
-        if setter_info.get("year") == 2027:
-            st.caption(
-                f"{setter_info.get('year')} SEC · {setter_info.get('level')} "
-                f"{setter_info.get('subject')} · {setter_info.get('subject_code')}"
-            )
-
-        setter_assessment = st.selectbox(
-            "Assessment type",
-            ["Weighted Assessment (WA)", "End-of-Year (EOY)", "Class test", "Worksheet", "Preliminary examination"],
-            key="setter_assessment_type",
-        )
-        c1, c2 = st.columns(2)
-        setter_marks = c1.number_input("Total marks", min_value=10, max_value=200, value=50, step=5, key="setter_total_marks")
-        setter_questions = c2.number_input("Main questions", min_value=1, max_value=40, value=12, step=1, key="setter_question_count")
-        setter_duration = st.number_input("Duration (minutes)", min_value=20, max_value=240, value=75, step=5, key="setter_duration")
-        setter_school = st.text_input("School name (optional - otherwise infer from reference)", key="setter_school")
-        setter_title = st.text_input("Paper title (optional)", key="setter_title")
-
-    with right:
-        st.markdown("#### 2 · Syllabus scope")
-        setter_track_info = selected_track_info(setter_track_label)
-        available_strands = setter_track_info.get("strands", [])
-        setter_topics = st.multiselect(
-            "Topics / strands to test",
-            options=available_strands,
-            default=available_strands,
-            key=f"setter_topics_{track_code(setter_track_label)}",
-        )
-        setter_syllabus_notes = st.text_area(
-            "Exact chapters / techniques taught",
-            key="setter_syllabus_notes",
-            height=130,
-            placeholder=(
-                "Example: Algebraic manipulation; linear equations; Pythagoras; trigonometry. "
-                "List exclusions too, e.g. no quadratic formula yet."
-            ),
-            help="Use this to narrow the broad syllabus strands to the exact taught chapters.",
-        )
-        include_scheme = st.checkbox(
-            "Generate marking scheme together with the paper",
-            value=False,
-            key="setter_include_scheme",
-        )
-
-    st.markdown("#### 3 · Reference format paper (required)")
-    setter_reference = st.file_uploader(
-        "Upload a past paper of the SAME assessment type",
-        type=["pdf", "docx", "doc"],
-        accept_multiple_files=False,
-        key="setter_reference_upload",
-        help="This paper is used for format, section structure, mark placement and difficulty gradient only. Questions are not copied.",
-    )
-
-    reference_ready = False
-    reference_text = ""
-    reference_assets: list[UploadedAsset] = []
-    if setter_reference is not None:
-        try:
-            reference_text, reference_assets = full_paper_input(setter_reference)
-            reference_ready = bool(reference_assets or reference_text.strip())
-            st.success(
-                f"Reference loaded: {setter_reference.name}"
-                + (f" · {len(reference_text):,} characters extracted" if reference_text else "")
-            )
-        except GeminiTutorError as exc:
-            st.error(str(exc))
-
-    scope_ready = bool(setter_topics or setter_syllabus_notes.strip())
-    can_generate = reference_ready and scope_ready
-
-    if st.button(
-        "Generate assessment paper",
-        type="primary",
-        use_container_width=True,
-        disabled=not can_generate,
-        key="setter_generate_button",
-    ):
-        st.session_state.setter_error = ""
-        st.session_state.setter_draft = None
-        try:
-            with st.spinner("Reading the reference format, setting questions and auditing mark totals..."):
-                draft = generate_exam_paper_draft(
-                    track_label=setter_track_label,
-                    assessment_type=setter_assessment,
-                    total_marks=int(setter_marks),
-                    number_of_questions=int(setter_questions),
-                    duration_minutes=int(setter_duration),
-                    topics=list(setter_topics),
-                    syllabus_notes=setter_syllabus_notes,
-                    reference_text=reference_text,
-                    reference_assets=reference_assets,
-                    school_name=setter_school,
-                    paper_title=setter_title,
-                    include_marking_scheme=include_scheme,
-                    api_key=explicit_key,
-                    model=model,
-                )
-            st.session_state.setter_draft = draft
-            st.rerun()
-        except GeminiTutorError as exc:
-            st.session_state.setter_error = str(exc)
-            st.rerun()
-        except Exception as exc:
-            st.session_state.setter_error = f"{type(exc).__name__}: {str(exc)[:400]}"
-            st.rerun()
-
-    if st.session_state.get("setter_error"):
-        st.error(st.session_state.setter_error)
-
-    setter_draft = st.session_state.get("setter_draft")
-    if setter_draft is not None:
-        render_setter_preview(setter_draft)
-
-        if setter_draft.reference_format_summary:
-            with st.expander("Reference-format features used", expanded=False):
-                for item in setter_draft.reference_format_summary:
-                    st.markdown(f"- {item}")
-
-        if setter_draft.verification_notes:
-            with st.expander("Paper audit notes", expanded=False):
-                for item in setter_draft.verification_notes:
-                    st.markdown(f"- {item}")
-
-        question_docx = build_setter_question_paper_docx(setter_draft)
-        downloads = st.columns(2 if include_scheme else 1)
-        downloads[0].download_button(
-            "Download question paper (.docx)",
-            data=question_docx,
-            file_name="Generated_Maths_Question_Paper.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
-        )
-        if include_scheme:
-            scheme_docx = build_setter_marking_scheme_docx(setter_draft)
-            downloads[1].download_button(
-                "Download marking scheme (.docx)",
-                data=scheme_docx,
-                file_name="Generated_Maths_Marking_Scheme.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-
-# ---------- Full paper worked solutions ----------
-with paper_tab:
-    st.caption("Build 2026-08-17 · full-paper MathIO solutions")
-    st.markdown('<div class="omt-section-kicker">Teacher / revision workflow</div>', unsafe_allow_html=True)
-    st.markdown('<div class="omt-section-title">Full paper worked solutions + marking guide</div>', unsafe_allow_html=True)
-    st.write(
-        "Upload a complete PDF or Word exam paper. The tutor detects every main question and subpart, "
-        "then generates verified worked solutions and an AI-suggested marking guide."
-    )
-    st.warning(
-        "The marking guide is a teaching aid, not an official SEAB/MOE mark scheme. "
-        "For formal grading, use the official marking scheme where available."
-    )
-
-    paper_file = st.file_uploader(
-        "Upload full exam paper",
-        type=["pdf", "docx", "doc"],
-        accept_multiple_files=False,
-        key="full_paper_upload",
-        help="PDF and modern Word .docx files are supported. Legacy .doc files should be saved as .docx or PDF.",
-    )
-    paper_generation_mode = st.radio(
-        "Full-paper generation mode",
-        ["Reliable", "Faster"],
+    st.caption("Build 2026-08-18 · Math Advisor combined teacher workflow")
+    st.markdown('<div class="omt-section-kicker">Teacher assessment tools</div>', unsafe_allow_html=True)
+    st.markdown('<div class="omt-section-title">Paper setter, solutions & marking scheme</div>', unsafe_allow_html=True)
+    teacher_workflow_mode = st.radio(
+        "What would you like to do?",
+        ["Create a new assessment paper", "Upload an existing question paper"],
         horizontal=True,
-        key="paper_generation_mode",
+        key="teacher_paper_workflow_mode",
         help=(
-            "Reliable uses structured retries and independent verification for every question. "
-            "Faster reduces retry effort but may need more manual review."
+            "Create a fresh assessment using a reference-format paper, or upload an existing question paper "
+            "to generate worked solutions and a teacher marking scheme."
         ),
     )
-    st.caption(
-        "Questions are solved one at a time. A failure on one question no longer stops or invalidates the rest of the paper."
-    )
 
-    paper_title = st.text_input(
-        "Paper title (optional)",
-        key="full_paper_title",
-        placeholder="Example: 2027 G3 Mathematics Revision Paper 1",
-    )
+    if teacher_workflow_mode == "Create a new assessment paper":
+        st.caption("Build 2026-08-18 · native Word vector equations")
+        st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
+        st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
+        st.write(
+            "Choose the syllabus scope, assessment type, marks and duration, then upload a past paper that defines the format. "
+            "The generator follows that reference structure while writing fresh questions."
+        )
+        st.info(
+            "The reference paper is required: format, numbering, mark placement and difficulty gradient are not guessed. "
+            "Generated marking schemes are teacher drafts, not official SEAB/MOE schemes."
+        )
 
-    if paper_file is not None:
-        signature = f"visual-safe-v2:{paper_file.name}:{getattr(paper_file, 'size', 0)}"
-        if st.session_state.paper_signature != signature:
-            st.session_state.paper_signature = signature
-            st.session_state.paper_detection = None
-            st.session_state.paper_solutions = []
-            st.session_state.paper_errors = []
+        left, right = st.columns([1, 1], gap="large")
+        with left:
+            st.markdown("#### 1 · Assessment settings")
+            setter_track_label = st.selectbox(
+                "Selected level / syllabus",
+                options=list(APP_TRACKS.keys()),
+                index=list(APP_TRACKS.keys()).index(track_label) if track_label in APP_TRACKS else 0,
+                key="setter_track_label",
+                help="Choose the syllabus for this assessment independently of the main tutor sidebar.",
+            )
+            setter_info = selected_track_info(setter_track_label)
+            if setter_info.get("year") == 2027:
+                st.caption(
+                    f"{setter_info.get('year')} SEC · {setter_info.get('level')} "
+                    f"{setter_info.get('subject')} · {setter_info.get('subject_code')}"
+                )
 
-        try:
-            paper_text, paper_assets = full_paper_input(paper_file)
-            st.success(
-                f"Loaded {paper_file.name}"
-                + (f" · extracted {len(paper_text):,} characters of Word text" if paper_text else "")
+            setter_assessment = st.selectbox(
+                "Assessment type",
+                ["Weighted Assessment (WA)", "End-of-Year (EOY)", "Class test", "Worksheet", "Preliminary examination"],
+                key="setter_assessment_type",
+            )
+            c1, c2 = st.columns(2)
+            setter_marks = c1.number_input("Total marks", min_value=10, max_value=200, value=50, step=5, key="setter_total_marks")
+            setter_questions = c2.number_input("Main questions", min_value=1, max_value=40, value=12, step=1, key="setter_question_count")
+            setter_duration = st.number_input("Duration (minutes)", min_value=20, max_value=240, value=75, step=5, key="setter_duration")
+            setter_school = st.text_input("School name (optional - otherwise infer from reference)", key="setter_school")
+            setter_title = st.text_input("Paper title (optional)", key="setter_title")
+
+        with right:
+            st.markdown("#### 2 · Syllabus scope")
+            setter_track_info = selected_track_info(setter_track_label)
+            available_strands = setter_track_info.get("strands", [])
+            setter_topics = st.multiselect(
+                "Topics / strands to test",
+                options=available_strands,
+                default=available_strands,
+                key=f"setter_topics_{track_code(setter_track_label)}",
+            )
+            setter_syllabus_notes = st.text_area(
+                "Exact chapters / techniques taught",
+                key="setter_syllabus_notes",
+                height=130,
+                placeholder=(
+                    "Example: Algebraic manipulation; linear equations; Pythagoras; trigonometry. "
+                    "List exclusions too, e.g. no quadratic formula yet."
+                ),
+                help="Use this to narrow the broad syllabus strands to the exact taught chapters.",
+            )
+            include_scheme = st.checkbox(
+                "Generate marking scheme together with the paper",
+                value=False,
+                key="setter_include_scheme",
             )
 
-            if st.button("1 · Detect all questions and subparts", use_container_width=True):
-                with st.spinner("Reading the full paper structure..."):
-                    detection = detect_questions_in_assets(
-                        track_label=track_label,
-                        question_assets=paper_assets,
-                        paper_text=paper_text,
+        st.markdown("#### 3 · Reference format paper (required)")
+        setter_reference = st.file_uploader(
+            "Upload a past paper of the SAME assessment type",
+            type=["pdf", "docx", "doc"],
+            accept_multiple_files=False,
+            key="setter_reference_upload",
+            help="This paper is used for format, section structure, mark placement and difficulty gradient only. Questions are not copied.",
+        )
+
+        reference_ready = False
+        reference_text = ""
+        reference_assets: list[UploadedAsset] = []
+        if setter_reference is not None:
+            try:
+                reference_text, reference_assets = full_paper_input(setter_reference)
+                reference_ready = bool(reference_assets or reference_text.strip())
+                st.success(
+                    f"Reference loaded: {setter_reference.name}"
+                    + (f" · {len(reference_text):,} characters extracted" if reference_text else "")
+                )
+            except GeminiTutorError as exc:
+                st.error(str(exc))
+
+        scope_ready = bool(setter_topics or setter_syllabus_notes.strip())
+        can_generate = reference_ready and scope_ready
+
+        if st.button(
+            "Generate assessment paper",
+            type="primary",
+            use_container_width=True,
+            disabled=not can_generate,
+            key="setter_generate_button",
+        ):
+            st.session_state.setter_error = ""
+            st.session_state.setter_draft = None
+            try:
+                with st.spinner("Reading the reference format, setting questions and auditing mark totals..."):
+                    draft = generate_exam_paper_draft(
+                        track_label=setter_track_label,
+                        assessment_type=setter_assessment,
+                        total_marks=int(setter_marks),
+                        number_of_questions=int(setter_questions),
+                        duration_minutes=int(setter_duration),
+                        topics=list(setter_topics),
+                        syllabus_notes=setter_syllabus_notes,
+                        reference_text=reference_text,
+                        reference_assets=reference_assets,
+                        school_name=setter_school,
+                        paper_title=setter_title,
+                        include_marking_scheme=include_scheme,
                         api_key=explicit_key,
                         model=model,
                     )
-                st.session_state.paper_detection = detection
-                st.session_state.paper_solutions = []
-                st.session_state.paper_errors = []
+                st.session_state.setter_draft = draft
+                st.rerun()
+            except GeminiTutorError as exc:
+                st.session_state.setter_error = str(exc)
+                st.rerun()
+            except Exception as exc:
+                st.session_state.setter_error = f"{type(exc).__name__}: {str(exc)[:400]}"
                 st.rerun()
 
-            detection = st.session_state.get("paper_detection")
-            if detection is not None:
-                st.markdown("### Detected paper structure")
-                st.success(
-                    f"Detected {detection.main_question_count} main question(s)"
-                    + (
-                        f"; {sum(len(q.subparts) for q in detection.questions)} subpart(s)."
-                        if detection.questions else "."
-                    )
-                )
-                if detection.notes:
-                    for note in detection.notes:
-                        st.caption(f"• {note}")
+        if st.session_state.get("setter_error"):
+            st.error(st.session_state.setter_error)
 
-                preview_rows = []
-                for q in detection.questions:
-                    preview_rows.append(
-                        {
-                            "Question": q.question_number,
-                            "Topic": q.topic_hint,
-                            "Subparts": ", ".join(p.label for p in q.subparts) or "Whole question",
-                            "Pages": ", ".join(map(str, q.page_numbers)) or "—",
-                            "Confidence": q.confidence.title(),
-                        }
-                    )
-                if preview_rows:
-                    st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
+        setter_draft = st.session_state.get("setter_draft")
+        if setter_draft is not None:
+            render_setter_preview(setter_draft)
 
-                st.caption(
-                    "Generation verifies each question independently. Geometry/shaded-area questions use the topology-first accuracy checks."
-                )
+            if setter_draft.reference_format_summary:
+                with st.expander("Reference-format features used", expanded=False):
+                    for item in setter_draft.reference_format_summary:
+                        st.markdown(f"- {item}")
 
-                if st.button(
-                    "2 · Generate full worked solutions + marking guide",
-                    type="primary",
+            if setter_draft.verification_notes:
+                with st.expander("Paper audit notes", expanded=False):
+                    for item in setter_draft.verification_notes:
+                        st.markdown(f"- {item}")
+
+            question_docx = build_setter_question_paper_docx(setter_draft)
+            downloads = st.columns(2 if include_scheme else 1)
+            downloads[0].download_button(
+                "Download question paper (.docx)",
+                data=question_docx,
+                file_name="Generated_Maths_Question_Paper.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+            if include_scheme:
+                scheme_docx = build_setter_marking_scheme_docx(setter_draft)
+                downloads[1].download_button(
+                    "Download marking scheme (.docx)",
+                    data=scheme_docx,
+                    file_name="Generated_Maths_Marking_Scheme.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     use_container_width=True,
-                ):
+                )
+
+# ---------- Existing question paper → solutions + marking scheme ----------
+with setter_tab:
+    if teacher_workflow_mode == "Upload an existing question paper":
+        st.markdown("### Upload question paper → solutions + marking scheme")
+        st.caption(
+            "Upload a complete PDF or Word question paper. Math Advisor will detect the questions, "
+            "generate worked solutions, and create a teacher marking scheme."
+        )
+        st.caption("Build 2026-08-17 · full-paper MathIO solutions")
+        st.markdown('<div class="omt-section-kicker">Teacher / revision workflow</div>', unsafe_allow_html=True)
+        st.markdown('<div class="omt-section-title">Worked solutions + marking scheme</div>', unsafe_allow_html=True)
+        st.write(
+            "Upload a complete PDF or Word exam paper. The tutor detects every main question and subpart, "
+            "then generates verified worked solutions and an AI-suggested marking scheme."
+        )
+        st.warning(
+            "The marking scheme is a teaching aid, not an official SEAB/MOE mark scheme. "
+            "For formal grading, use the official marking scheme where available."
+        )
+
+        paper_file = st.file_uploader(
+            "Upload full exam paper",
+            type=["pdf", "docx", "doc"],
+            accept_multiple_files=False,
+            key="full_paper_upload",
+            help="PDF and modern Word .docx files are supported. Legacy .doc files should be saved as .docx or PDF.",
+        )
+        paper_generation_mode = st.radio(
+            "Full-paper generation mode",
+            ["Reliable", "Faster"],
+            horizontal=True,
+            key="paper_generation_mode",
+            help=(
+                "Reliable uses structured retries and independent verification for every question. "
+                "Faster reduces retry effort but may need more manual review."
+            ),
+        )
+        st.caption(
+            "Questions are solved one at a time. A failure on one question no longer stops or invalidates the rest of the paper."
+        )
+
+        paper_title = st.text_input(
+            "Paper title (optional)",
+            key="full_paper_title",
+            placeholder="Example: 2027 G3 Mathematics Revision Paper 1",
+        )
+
+        if paper_file is not None:
+            signature = f"visual-safe-v2:{paper_file.name}:{getattr(paper_file, 'size', 0)}"
+            if st.session_state.paper_signature != signature:
+                st.session_state.paper_signature = signature
+                st.session_state.paper_detection = None
+                st.session_state.paper_solutions = []
+                st.session_state.paper_errors = []
+
+            try:
+                paper_text, paper_assets = full_paper_input(paper_file)
+                st.success(
+                    f"Loaded {paper_file.name}"
+                    + (f" · extracted {len(paper_text):,} characters of Word text" if paper_text else "")
+                )
+
+                if st.button("1 · Detect all questions and subparts", use_container_width=True):
+                    with st.spinner("Reading the full paper structure..."):
+                        detection = detect_questions_in_assets(
+                            track_label=track_label,
+                            question_assets=paper_assets,
+                            paper_text=paper_text,
+                            api_key=explicit_key,
+                            model=model,
+                        )
+                    st.session_state.paper_detection = detection
                     st.session_state.paper_solutions = []
                     st.session_state.paper_errors = []
-                    progress = st.progress(0.0, text="Starting paper solution generation...")
-                    total_questions = max(1, len(detection.questions))
-
-                    solutions: list[PaperQuestionSolution] = []
-                    errors: list[str] = []
-                    for index, detected_question in enumerate(detection.questions, 1):
-                        progress.progress(
-                            (index - 1) / total_questions,
-                            text=f"Solving Question {detected_question.question_number} ({index}/{total_questions}) · {paper_generation_mode} mode...",
-                        )
-                        try:
-                            next_question_number = detection.questions[index].question_number if index < len(detection.questions) else None
-                            focused_paper_text = paper_question_text_context(
-                                detected_question, paper_text, next_question_number
-                            )
-                            scoped_assets = scoped_assets_for_paper_question(
-                                paper_assets,
-                                detected_question.page_numbers,
-                            )
-                            if str(getattr(paper_file, "name", "")).lower().endswith(".docx"):
-                                question_visual_text = " ".join(
-                                    [
-                                        detected_question.question_text or "",
-                                        *[
-                                            getattr(part, "question_text", "") or ""
-                                            for part in (getattr(detected_question, "subparts", []) or [])
-                                        ],
-                                    ]
-                                )
-                                needs_visual = bool(
-                                    re.search(
-                                        r"\b(diagram|figure|graph|table|chart|grid|shape|circle|semicircle|triangle|angle|coordinates?|plot|draw|sketch|construction|map|pie chart|histogram)\b",
-                                        question_visual_text,
-                                        re.IGNORECASE,
-                                    )
-                                )
-                                scoped_assets = scoped_assets[:8] if needs_visual else []
-                            solution = generate_paper_question_solution(
-                                track_label=track_label,
-                                detected_question=detected_question,
-                                question_assets=scoped_assets,
-                                paper_text_context=focused_paper_text,
-                                api_key=explicit_key,
-                                model=model,
-                            )
-                            solutions.append(solution)
-                        except GeminiTutorError as exc:
-                            errors.append(f"Question {detected_question.question_number}: {exc}")
-                            message = str(exc).lower()
-                            if "quota" in message or "rate limit" in message or "ratelimit" in message or "free-tier" in message:
-                                errors.append("Generation stopped because the Gemini quota/rate limit was reached. Completed questions are preserved; continue later.")
-                                break
-                        except Exception as exc:
-                            errors.append(
-                                f"Question {detected_question.question_number}: {type(exc).__name__}: {str(exc)[:300]}"
-                            )
-
-                    progress.progress(1.0, text="Paper generation complete.")
-                    st.session_state.paper_solutions = solutions
-                    st.session_state.paper_errors = errors
                     st.rerun()
 
-                solutions = st.session_state.get("paper_solutions") or []
-                errors = st.session_state.get("paper_errors") or []
-
-                if errors:
-                    st.warning(
-                        f"{len(errors)} question(s) could not be completed reliably. "
-                        "They are listed below rather than guessed."
+                detection = st.session_state.get("paper_detection")
+                if detection is not None:
+                    st.markdown("### Detected paper structure")
+                    st.success(
+                        f"Detected {detection.main_question_count} main question(s)"
+                        + (
+                            f"; {sum(len(q.subparts) for q in detection.questions)} subpart(s)."
+                            if detection.questions else "."
+                        )
                     )
-                    for error in errors:
-                        st.error(error)
+                    if detection.notes:
+                        for note in detection.notes:
+                            st.caption(f"• {note}")
 
-                if solutions:
-                    st.markdown("## Worked solutions")
-                    total_marks = sum(solution.total_marks for solution in solutions)
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Questions completed", len(solutions))
-                    c2.metric("Suggested / printed marks", total_marks)
-                    c3.metric("Questions needing review", len(errors))
+                    preview_rows = []
+                    for q in detection.questions:
+                        preview_rows.append(
+                            {
+                                "Question": q.question_number,
+                                "Topic": q.topic_hint,
+                                "Subparts": ", ".join(p.label for p in q.subparts) or "Whole question",
+                                "Pages": ", ".join(map(str, q.page_numbers)) or "—",
+                                "Confidence": q.confidence.title(),
+                            }
+                        )
+                    if preview_rows:
+                        st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
 
-                    for solution in solutions:
-                        render_paper_question_solution(solution)
-
-                    markdown_export = paper_solution_markdown(
-                        track_label=track_label,
-                        paper_title=paper_title or os.path.splitext(paper_file.name)[0],
-                        solutions=solutions,
+                    st.caption(
+                        "Generation verifies each question independently. Geometry/shaded-area questions use the topology-first accuracy checks."
                     )
-                    docx_export = build_paper_solution_docx(
-                        track_label=track_label,
-                        paper_title=paper_title or os.path.splitext(paper_file.name)[0],
-                        solutions=solutions,
-                    )
-                    d1, d2 = st.columns(2)
-                    d1.download_button(
-                        "Download solutions as Markdown",
-                        data=markdown_export.encode("utf-8"),
-                        file_name=f"{os.path.splitext(paper_file.name)[0]}_worked_solutions.md",
-                        mime="text/markdown",
+
+                    if st.button(
+                        "2 · Generate worked solutions + marking scheme",
+                        type="primary",
                         use_container_width=True,
-                    )
-                    d2.download_button(
-                        "Download solutions + marking guide as Word",
-                        data=docx_export,
-                        file_name=f"{os.path.splitext(paper_file.name)[0]}_worked_solutions_marking_guide.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        use_container_width=True,
-                    )
-        except GeminiTutorError as exc:
-            st.error(str(exc))
+                    ):
+                        st.session_state.paper_solutions = []
+                        st.session_state.paper_errors = []
+                        progress = st.progress(0.0, text="Starting paper solution generation...")
+                        total_questions = max(1, len(detection.questions))
 
+                        solutions: list[PaperQuestionSolution] = []
+                        errors: list[str] = []
+                        for index, detected_question in enumerate(detection.questions, 1):
+                            progress.progress(
+                                (index - 1) / total_questions,
+                                text=f"Solving Question {detected_question.question_number} ({index}/{total_questions}) · {paper_generation_mode} mode...",
+                            )
+                            try:
+                                next_question_number = detection.questions[index].question_number if index < len(detection.questions) else None
+                                focused_paper_text = paper_question_text_context(
+                                    detected_question, paper_text, next_question_number
+                                )
+                                scoped_assets = scoped_assets_for_paper_question(
+                                    paper_assets,
+                                    detected_question.page_numbers,
+                                )
+                                if str(getattr(paper_file, "name", "")).lower().endswith(".docx"):
+                                    question_visual_text = " ".join(
+                                        [
+                                            detected_question.question_text or "",
+                                            *[
+                                                getattr(part, "question_text", "") or ""
+                                                for part in (getattr(detected_question, "subparts", []) or [])
+                                            ],
+                                        ]
+                                    )
+                                    needs_visual = bool(
+                                        re.search(
+                                            r"\b(diagram|figure|graph|table|chart|grid|shape|circle|semicircle|triangle|angle|coordinates?|plot|draw|sketch|construction|map|pie chart|histogram)\b",
+                                            question_visual_text,
+                                            re.IGNORECASE,
+                                        )
+                                    )
+                                    scoped_assets = scoped_assets[:8] if needs_visual else []
+                                solution = generate_paper_question_solution(
+                                    track_label=track_label,
+                                    detected_question=detected_question,
+                                    question_assets=scoped_assets,
+                                    paper_text_context=focused_paper_text,
+                                    api_key=explicit_key,
+                                    model=model,
+                                )
+                                solutions.append(solution)
+                            except GeminiTutorError as exc:
+                                errors.append(f"Question {detected_question.question_number}: {exc}")
+                                message = str(exc).lower()
+                                if "quota" in message or "rate limit" in message or "ratelimit" in message or "free-tier" in message:
+                                    errors.append("Generation stopped because the Gemini quota/rate limit was reached. Completed questions are preserved; continue later.")
+                                    break
+                            except Exception as exc:
+                                errors.append(
+                                    f"Question {detected_question.question_number}: {type(exc).__name__}: {str(exc)[:300]}"
+                                )
+
+                        progress.progress(1.0, text="Paper generation complete.")
+                        st.session_state.paper_solutions = solutions
+                        st.session_state.paper_errors = errors
+                        st.rerun()
+
+                    solutions = st.session_state.get("paper_solutions") or []
+                    errors = st.session_state.get("paper_errors") or []
+
+                    if errors:
+                        st.warning(
+                            f"{len(errors)} question(s) could not be completed reliably. "
+                            "They are listed below rather than guessed."
+                        )
+                        for error in errors:
+                            st.error(error)
+
+                    if solutions:
+                        st.markdown("## Worked solutions")
+                        total_marks = sum(solution.total_marks for solution in solutions)
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Questions completed", len(solutions))
+                        c2.metric("Suggested / printed marks", total_marks)
+                        c3.metric("Questions needing review", len(errors))
+
+                        for solution in solutions:
+                            render_paper_question_solution(solution)
+
+                        markdown_export = paper_solution_markdown(
+                            track_label=track_label,
+                            paper_title=paper_title or os.path.splitext(paper_file.name)[0],
+                            solutions=solutions,
+                        )
+                        docx_export = build_paper_solution_docx(
+                            track_label=track_label,
+                            paper_title=paper_title or os.path.splitext(paper_file.name)[0],
+                            solutions=solutions,
+                        )
+                        d1, d2 = st.columns(2)
+                        d1.download_button(
+                            "Download solutions as Markdown",
+                            data=markdown_export.encode("utf-8"),
+                            file_name=f"{os.path.splitext(paper_file.name)[0]}_worked_solutions.md",
+                            mime="text/markdown",
+                            use_container_width=True,
+                        )
+                        d2.download_button(
+                            "Download solutions + marking scheme as Word",
+                            data=docx_export,
+                            file_name=f"{os.path.splitext(paper_file.name)[0]}_worked_solutions_marking_guide.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            use_container_width=True,
+                        )
+            except GeminiTutorError as exc:
+                st.error(str(exc))
 
 # ---------- Gemini online analysis ----------
 with ai_tab:
