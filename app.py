@@ -673,9 +673,15 @@ export default async function(component) {{
   }}
 
   const incoming = normalizedPayload(data?.payload);
-  const state = parentElement.__omtState || {{ payload: incoming, timer: null, active: null }};
+  const state = parentElement.__omtState || {{
+    payload: incoming,
+    timer: null,
+    active: null,
+    keyboardOpen: false,
+  }};
   parentElement.__omtState = state;
   state.payload = incoming;
+  if (typeof state.keyboardOpen !== 'boolean') state.keyboardOpen = false;
 
   const currentField = () => {{
     const mf = state.active && rows.contains(state.active) ? state.active : rows.querySelector('math-field');
@@ -696,13 +702,15 @@ export default async function(component) {{
   const scheduleEmit = () => {{
     status.textContent = 'Editing…';
     if (state.timer) clearTimeout(state.timer);
-    state.timer = setTimeout(emit, 700);
+    state.timer = setTimeout(emit, 1400);
   }};
 
   const showKeyboard = () => {{
     const mf = currentField();
     if (!mf) {{ status.textContent='Tap a maths box first.'; return; }}
-    state.active = mf; mf.focus();
+    state.active = mf;
+    state.keyboardOpen = true;
+    mf.focus();
     keyboardPanel.hidden = false;
     keyboardButton.textContent = '⌨ Hide keyboard';
     keyboardButton.setAttribute('aria-expanded','true');
@@ -710,6 +718,7 @@ export default async function(component) {{
   }};
 
   const hideKeyboard = () => {{
+    state.keyboardOpen = false;
     keyboardPanel.hidden = true;
     keyboardButton.textContent = '⌨ Math keyboard';
     keyboardButton.setAttribute('aria-expanded','false');
@@ -721,6 +730,13 @@ export default async function(component) {{
   }};
 
   const renderRows = () => {{
+    let activeIndex = 0;
+    if (state.active && rows.contains(state.active)) {{
+      const editorsBefore = Array.from(rows.querySelectorAll('math-field'));
+      const found = editorsBefore.indexOf(state.active);
+      if (found >= 0) activeIndex = found;
+    }}
+
     rows.replaceChildren();
     state.payload.latex.forEach((value, index) => {{
       const row = document.createElement('div');
@@ -742,7 +758,8 @@ export default async function(component) {{
         state.active = mf;
         const coarse = globalThis.matchMedia && globalThis.matchMedia('(pointer: coarse)').matches;
         const narrow = globalThis.innerWidth <= 700;
-        if ((coarse || narrow) && keyboardPanel.hidden) {{
+        if ((coarse || narrow) && !state.keyboardOpen) {{
+          state.keyboardOpen = true;
           keyboardPanel.hidden = false;
           keyboardButton.textContent = '⌨ Hide keyboard';
           keyboardButton.setAttribute('aria-expanded','true');
@@ -770,6 +787,11 @@ export default async function(component) {{
       row.append(step, mf, remove);
       rows.appendChild(row);
     }});
+
+    const editorsAfter = rows.querySelectorAll('math-field');
+    if (editorsAfter.length) {{
+      state.active = editorsAfter[Math.min(activeIndex, editorsAfter.length - 1)];
+    }}
   }};
 
   toolbar.querySelectorAll('button[data-insert]').forEach(button => {{
@@ -817,9 +839,22 @@ export default async function(component) {{
     if (mf) {{ state.active = mf; mf.focus(); }}
   }};
 
-  keyboardPanel.hidden = true;
-  keyboardButton.setAttribute('aria-expanded','false');
+  keyboardPanel.hidden = !state.keyboardOpen;
+  keyboardButton.textContent = state.keyboardOpen ? '⌨ Hide keyboard' : '⌨ Math keyboard';
+  keyboardButton.setAttribute('aria-expanded', state.keyboardOpen ? 'true' : 'false');
   renderRows();
+
+  // setStateValue() causes the Streamlit component to rerender after typing.
+  // Restore focus without toggling the keyboard so the panel stays open.
+  if (state.keyboardOpen) {{
+    const mf = currentField();
+    if (mf) {{
+      state.active = mf;
+      setTimeout(() => {{
+        try {{ mf.focus({{ preventScroll: true }}); }} catch (_) {{ try {{ mf.focus(); }} catch (_) {{}} }}
+      }}, 0);
+    }}
+  }}
 }}
 """
 
@@ -4905,7 +4940,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · generated diagrams in papers and solutions")
+    st.caption("Build 2026-08-18 · persistent mobile math keyboard")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
