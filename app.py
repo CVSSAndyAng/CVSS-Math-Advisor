@@ -1,4 +1,6 @@
 from __future__ import annotations
+from types import SimpleNamespace
+import copy
 
 import ast
 import base64
@@ -3268,7 +3270,7 @@ def render_guidance_mixed_mathio(value: str) -> None:
     whole English sentence to MathIO while still rendering expressions such as
     (1+y)^7, x^7 and (1+x+x^2)^7 properly.
     """
-    text = clean_guidance_text(value)
+    text = _normalize_integral_source(clean_guidance_text(value))
     if not text:
         return
 
@@ -4165,10 +4167,42 @@ def _append_omml_expression(parent, source: str) -> None:
     flush_plain()
 
 
+
+def _normalize_integral_source(source: str) -> str:
+    text=str(source or "")
+    text=re.sub(r"\\?int_([A-Za-z0-9.+-]+)\^\(([^)]+)\)",r"\\int_{\1}^{\2}",text)
+    text=re.sub(r"\\?int_([A-Za-z0-9.+-]+)\^([A-Za-z0-9.+-]+)",r"\\int_{\1}^{\2}",text)
+    text=re.sub(r"(?<!\\)\bint(?=_|\s)",r"\\int",text)
+    return text
+
+def _append_native_integral(paragraph, source: str) -> bool:
+    src=_normalize_integral_source(source).strip()
+    m=re.match(r"\\int(?:_\{([^{}]+)\})?(?:\^\{([^{}]+)\})?\s*(.*)$",src,re.S)
+    if not m:
+        return False
+    lower,upper,body=m.group(1),m.group(2),m.group(3)
+    math=OxmlElement("m:oMath")
+    nary=OxmlElement("m:nary")
+    pr=OxmlElement("m:naryPr")
+    ch=OxmlElement("m:chr"); ch.set(qn("m:val"),"∫")
+    lim=OxmlElement("m:limLoc"); lim.set(qn("m:val"),"subSup")
+    pr.extend([ch,lim]); nary.append(pr)
+    sub=OxmlElement("m:sub")
+    if lower: _append_omml_expression(sub,lower)
+    nary.append(sub)
+    sup=OxmlElement("m:sup")
+    if upper: _append_omml_expression(sup,upper)
+    nary.append(sup)
+    elem=OxmlElement("m:e"); _append_omml_expression(elem,body); nary.append(elem)
+    math.append(nary); paragraph._p.append(math)
+    return True
+
 def append_word_math(paragraph, latex: str) -> None:
     """Insert an editable Microsoft Word Equation Editor object. DOCX stores these internally as OMML."""
-    source = str(latex or "").strip()
+    source = _normalize_integral_source(str(latex or "").strip())
     if not source:
+        return
+    if source.startswith(r"\int") and _append_native_integral(paragraph, source):
         return
     math = OxmlElement("m:oMath")
     _append_omml_expression(math, source)
@@ -4195,6 +4229,8 @@ _WORD_MATH_FRAGMENT_RE = re.compile(
         \s*(?:=|≤|≥|<|>)\s*
         [-+]?\d*(?:\.\d+)?[A-Za-z0-9]*(?:\^\{?[-+]?\d+\}?)?
         (?:\s*[+\-×÷*/]\s*[-+]?\d*(?:\.\d+)?[A-Za-z0-9]*(?:\^\{?[-+]?\d+\}?)?)*
+        |
+        \\?int(?:_\{?[^ \t\n{}()]+\}?|_\([^)]*\))?(?:\^\{?[^ \t\n{}()]+\}?|\^\([^)]*\))?\s*[^.;\n]+?\s*d[xyt]\b
         |
         \([^()\n]{1,100}\)\^\{?[-+]?\d+\}?
         |
@@ -4293,13 +4329,37 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
     plot_w = max(1, width - 2 * padding)
     plot_h = max(1, height - 2 * padding)
 
-    def xy(x, y):
-        px = padding + (float(x) - x_min) / (x_max - x_min) * plot_w
-        py = height - padding - (float(y) - y_min) / (y_max - y_min) * plot_h
-        return (int(round(px)), int(round(py)))
+    x_span = max(1e-9, x_max - x_min)
+    y_span = max(1e-9, y_max - y_min)
+    has_circles = bool(_scene_items(scene, "circles"))
+    preserve_aspect = has_circles or not bool(getattr(scene, "show_axes", False))
 
-    # Light frame.
-    draw.rectangle([padding, padding, width-padding, height-padding], outline=(205,205,205), width=1)
+    if preserve_aspect:
+        scale = min(plot_w / x_span, plot_h / y_span)
+        used_w = x_span * scale
+        used_h = y_span * scale
+        left = padding + (plot_w - used_w) / 2
+        top = padding + (plot_h - used_h) / 2
+        sx = sy = scale
+
+        def xy(x, y):
+            px = left + (float(x) - x_min) * scale
+            py = top + used_h - (float(y) - y_min) * scale
+            return (int(round(px)), int(round(py)))
+
+        frame = [int(left), int(top), int(left + used_w), int(top + used_h)]
+    else:
+        sx = plot_w / x_span
+        sy = plot_h / y_span
+
+        def xy(x, y):
+            px = padding + (float(x) - x_min) / x_span * plot_w
+            py = height - padding - (float(y) - y_min) / y_span * plot_h
+            return (int(round(px)), int(round(py)))
+
+        frame = [padding, padding, width-padding, height-padding]
+
+    draw.rectangle(frame, outline=(205,205,205), width=1)
 
     if bool(getattr(scene, "show_axes", False)):
         # Grid at sensible integer positions when range is moderate.
@@ -4336,8 +4396,6 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
                 draw.text((mx+6,my-16),label,fill=(25,25,25),font=font)
 
     # Circles.
-    sx = plot_w/(x_max-x_min)
-    sy = plot_h/(y_max-y_min)
     for c in _scene_items(scene,"circles"):
         cx=float(getattr(c,"center_x",0)); cy=float(getattr(c,"center_y",0)); r=float(getattr(c,"radius",1))
         center=xy(cx,cy)
@@ -4383,6 +4441,76 @@ def render_scene2d_png(scene, *, width: int = 960, height: int = 560, padding: i
     img.save(buf,format="PNG")
     return buf.getvalue()
 
+
+
+def _compile_generated_function(expression: str):
+    text = str(expression or "").replace("−","-").replace("×","*").replace("÷","/")
+    text = text.replace(r"\left","").replace(r"\right","").replace(r"\pi","pi").replace("π","pi")
+    for fn in ("sin","cos","tan","sqrt","log"):
+        text = text.replace("\\"+fn,fn)
+    text = text.replace("{","(").replace("}",")").replace("^","**")
+    text = re.sub(r"(?<=\d)(?=[A-Za-z(])","*",text)
+    text = re.sub(r"(?<=x)(?=\()","*",text)
+    text = re.sub(r"(?<=\))(?=[A-Za-z0-9(])","*",text)
+    if not re.fullmatch(r"[0-9A-Za-z_+\-*/().,\s*]+", text):
+        return None
+    allowed={"sin":math.sin,"cos":math.cos,"tan":math.tan,"sqrt":math.sqrt,"log":math.log,"pi":math.pi}
+    def f(x):
+        env=dict(allowed); env["x"]=float(x)
+        return float(eval(text,{"__builtins__":{}},env))
+    return f
+
+def ensure_question_function_curve(question):
+    scene=getattr(question,"diagram_scene_2d",None)
+    if scene is None or not bool(getattr(scene,"show_axes",False)):
+        return scene
+    if list(getattr(scene,"polylines",[]) or []):
+        return scene
+
+    parts=[str(getattr(question,"stem_text","") or "")]
+    parts += [str(x) for x in (getattr(question,"stem_equations",[]) or [])]
+    for p in (getattr(question,"parts",[]) or []):
+        parts.append(str(getattr(p,"prompt_text","") or ""))
+        parts += [str(x) for x in (getattr(p,"equations",[]) or [])]
+    source=" ".join(parts)
+    m=re.search(r"\by\s*=\s*([^.;\n]+)",source,re.I)
+    if not m:
+        return scene
+    expr=m.group(1).strip()
+    fn=_compile_generated_function(expr)
+    if fn is None:
+        return scene
+
+    try:
+        scene=scene.model_copy(deep=True)
+    except Exception:
+        scene=copy.deepcopy(scene)
+
+    xmin=float(getattr(scene,"x_min",-5) or -5)
+    xmax=float(getattr(scene,"x_max",5) or 5)
+    if xmax<=xmin: xmin,xmax=-5,5
+    chunks=[]; cur=[]; prev=None
+    for i in range(361):
+        x=xmin+(xmax-xmin)*i/360
+        try: y=fn(x)
+        except Exception: y=float("nan")
+        if not math.isfinite(y) or abs(y)>1e4:
+            if len(cur)>=2: chunks.append(cur)
+            cur=[]; prev=None; continue
+        if prev is not None and abs(y-prev)>30:
+            if len(cur)>=2: chunks.append(cur)
+            cur=[]
+        cur.append([x,y]); prev=y
+    if len(cur)>=2: chunks.append(cur)
+    if not chunks: return scene
+
+    scene.polylines=[SimpleNamespace(id=f"auto_curve_{i}",points=c,label=("y = "+expr if i==1 else "")) for i,c in enumerate(chunks,1)]
+    vals=[p[1] for c in chunks for p in c if math.isfinite(p[1])]
+    if vals:
+        lo,hi=min(vals),max(vals)
+        scene.y_min=min(float(getattr(scene,"y_min",lo) or lo), math.floor(lo-0.5))
+        scene.y_max=max(float(getattr(scene,"y_max",hi) or hi), math.ceil(hi+0.5))
+    return scene
 
 def show_scene2d(scene, *, caption: str = "") -> None:
     if scene is None:
@@ -4470,6 +4598,54 @@ def _scene3d_wire_segments(scene):
             for ring in (front,back):
                 for i in range(len(ring)): segs.append((ring[i],ring[(i+1)%len(ring)],"",False))
             for a,b in zip(front,back): segs.append((a,b,"",False))
+
+    # Cylinders
+    for cyl in list(getattr(scene,"cylinders",[]) or []):
+        cx,cy,cz=[float(v) for v in cyl.center]; r=float(cyl.radius); h=float(cyl.height)
+        axis=str(getattr(cyl,"axis","y")); rings=[]
+        for sign in (-1,1):
+            ring=[]
+            for k in range(40):
+                t=2*math.pi*k/40
+                if axis=="y": p=(cx+r*math.cos(t),cy+sign*h/2,cz+r*math.sin(t))
+                elif axis=="x": p=(cx+sign*h/2,cy+r*math.cos(t),cz+r*math.sin(t))
+                else: p=(cx+r*math.cos(t),cy+r*math.sin(t),cz+sign*h/2)
+                ring.append(_project3d_point(*p))
+            rings.append(ring)
+            for k in range(40): segs.append((ring[k],ring[(k+1)%40],"",False))
+        for k in (0,10,20,30): segs.append((rings[0][k],rings[1][k],"",False))
+
+    # Cones
+    for cone in list(getattr(scene,"cones",[]) or []):
+        cx,cy,cz=[float(v) for v in cone.center]; r=float(cone.radius); h=float(cone.height)
+        axis=str(getattr(cone,"axis","y")); direction=str(getattr(cone,"direction","positive"))
+        vs=1 if direction!="negative" else -1; bs=-vs
+        rim=[]
+        for k in range(48):
+            t=2*math.pi*k/48
+            if axis=="y":
+                p=(cx+r*math.cos(t),cy+bs*h/2,cz+r*math.sin(t)); apex=(cx,cy+vs*h/2,cz)
+            elif axis=="x":
+                p=(cx+bs*h/2,cy+r*math.cos(t),cz+r*math.sin(t)); apex=(cx+vs*h/2,cy,cz)
+            else:
+                p=(cx+r*math.cos(t),cy+r*math.sin(t),cz+bs*h/2); apex=(cx,cy,cz+vs*h/2)
+            rim.append(_project3d_point(*p))
+        ap=_project3d_point(*apex)
+        for k in range(48): segs.append((rim[k],rim[(k+1)%48],"",False))
+        for k in (0,12,24,36): segs.append((rim[k],ap,"",False))
+
+    # Spheres
+    for sph in list(getattr(scene,"spheres",[]) or []):
+        cx,cy,cz=[float(v) for v in sph.center]; r=float(sph.radius)
+        for plane in ("xy","xz","yz"):
+            ring=[]
+            for k in range(48):
+                t=2*math.pi*k/48
+                if plane=="xy": p=(cx+r*math.cos(t),cy+r*math.sin(t),cz)
+                elif plane=="xz": p=(cx+r*math.cos(t),cy,cz+r*math.sin(t))
+                else: p=(cx,cy+r*math.cos(t),cz+r*math.sin(t))
+                ring.append(_project3d_point(*p))
+            for k in range(48): segs.append((ring[k],ring[(k+1)%48],"",False))
 
     return segs, verts
 
@@ -4603,7 +4779,9 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
 
     doc.add_paragraph()
     figure_number = 0
-    for q in draft.questions:
+    for question_index, q in enumerate(draft.questions):
+        if question_index > 0:
+            doc.add_page_break()
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(8)
         r = p.add_run(f"{q.question_number}. "); r.bold = True
@@ -4619,9 +4797,10 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
             )
         elif getattr(q, "diagram_scene_2d", None) is not None:
             figure_number += 1
+            effective_scene_2d = ensure_question_function_curve(q)
             add_scene2d_to_word(
                 doc,
-                q.diagram_scene_2d,
+                effective_scene_2d,
                 caption=f"Figure {figure_number}",
             )
         elif q.diagram_spec:
@@ -4667,7 +4846,9 @@ def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
     doc.add_paragraph("AI-generated teacher draft. Recheck against departmental/official marking conventions before formal use.")
 
     figure_number = 0
-    for q in draft.questions:
+    for question_index, q in enumerate(draft.questions):
+        if question_index > 0:
+            doc.add_page_break()
         doc.add_heading(f"Question {q.question_number}", level=2)
         if getattr(q, "diagram_scene_3d", None) is not None:
             figure_number += 1
@@ -4759,8 +4940,9 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                 )
             elif getattr(q, "diagram_scene_2d", None) is not None:
                 figure_number += 1
+                effective_scene_2d = ensure_question_function_curve(q)
                 show_scene2d(
-                    q.diagram_scene_2d,
+                    effective_scene_2d,
                     caption=f"Figure {figure_number}",
                 )
             elif q.diagram_spec:
@@ -5168,7 +5350,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · sequential Figure numbering")
+    st.caption("Build 2026-08-18 · paper rendering accuracy v2")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(

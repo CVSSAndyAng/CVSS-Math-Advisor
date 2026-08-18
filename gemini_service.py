@@ -256,6 +256,10 @@ class VisualCone3D(BaseModel):
     radius: float = Field(gt=0)
     height: float = Field(gt=0)
     axis: Literal["x", "y", "z"] = "y"
+    direction: Literal["positive", "negative"] = Field(
+        default="positive",
+        description="Direction from the centre to the vertex. Use negative for a downward-pointing cone on the y-axis.",
+    )
     label: str = ""
 
 
@@ -1975,7 +1979,7 @@ NON-NEGOTIABLE PAPER-SETTER RULES
     - If a question requires a 2D geometry diagram, coordinate axes, function graph, number line, construction, or other 2D visual,
       populate diagram_scene_2d with a complete drawable scene. Do not return only a prose diagram_spec.
     - If the question gives a function to be graphed, diagram_scene_2d MUST contain a sampled polyline of the actual function,
-      not blank axes. Sample enough points to show its shape accurately over a sensible domain.
+      not blank axes. Sample enough points to show its shape accurately over a sensible domain. Blank axes are invalid for a function-graph question.
     - If a question requires a 3D solid, prism, pyramid, cone, cylinder, sphere, cuboid or spatial geometry,
       populate diagram_scene_3d using vertices/edges/faces and/or the available solid primitives.
     - Include every point/line/circle/curve/angle label that the student needs.
@@ -1984,6 +1988,9 @@ NON-NEGOTIABLE PAPER-SETTER RULES
       parallel/perpendicular lines, tangent points, chords, radii, equal lengths and angle locations. Never invent a generic polygon.
     - Circle-geometry questions MUST include the actual circle plus the tangent/chords/radii required by the wording.
     - For 3D questions use diagram_scene_3d rather than flattening the object into an arbitrary 2D polygon.
+    - If the question names a cone, cylinder or sphere, include the corresponding primitive.
+    - For a downward-pointing cone on the y-axis, set direction="negative".
+    - Never return an empty 3D scene for a question that explicitly names a 3D solid.
     - Set diagram_scene_2d=null only when no diagram materially helps or is required.
 11. ALL mathematical notation must be separated from prose wherever possible.
     - stem_text and prompt_text contain ordinary language only.
