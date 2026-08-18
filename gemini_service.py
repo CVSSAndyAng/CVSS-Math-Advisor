@@ -1978,8 +1978,8 @@ NON-NEGOTIABLE PAPER-SETTER RULES
 10. DIAGRAM REQUIREMENT:
     - If a question requires a 2D geometry diagram, coordinate axes, function graph, number line, construction, or other 2D visual,
       populate diagram_scene_2d with a complete drawable scene. Do not return only a prose diagram_spec.
-    - If the question gives a function to be graphed, diagram_scene_2d MUST contain a sampled polyline of the actual function,
-      not blank axes. Sample enough points to show its shape accurately over a sensible domain. Blank axes are invalid for a function-graph question.
+    - For a function-graph question, put the exact function in the equations field and provide sensible axes/bounds in diagram_scene_2d.
+      Do NOT output hundreds of sampled polyline points. The app plots standard functions deterministically from the equation.
     - If a question requires a 3D solid, prism, pyramid, cone, cylinder, sphere, cuboid or spatial geometry,
       populate diagram_scene_3d using vertices/edges/faces and/or the available solid primitives.
     - Include every point/line/circle/curve/angle label that the student needs.
@@ -2025,6 +2025,16 @@ Requested title: {paper_title or '[Create a suitable title matching the referenc
 REFERENCE PAPER EXTRACTED TEXT
 {reference_text[:50000] if reference_text.strip() else '[Reference supplied as attachment only]'}
 
+OUTPUT-SIZE CONTRACT
+- Return compact JSON. Do not repeat the question text in solution_steps or marking_points.
+- Use at most 4 concise solution_steps per part.
+- Each solution_step should normally be one short sentence plus an equation.
+- Each marking-point description must be concise (normally under 18 words).
+- verification_notes: at most 3 short items.
+- diagram scenes must contain only primitives needed to answer the question.
+- Never output dense sampled graph coordinates for standard algebraic/trigonometric functions.
+- Keep the complete response comfortably below 45,000 characters. Completeness is more important than verbosity.
+
 Before returning JSON, audit:
 - every question is fully solvable;
 - every part mark sum equals its question marks;
@@ -2042,23 +2052,64 @@ Return structured JSON only.
         inputs.append({"type": "text", "text": f"Reference paper source {i}: {asset.name}. Use for FORMAT only, never copy questions."})
         inputs.append(_encode_asset(asset))
 
-    def request(extra: str = "") -> ExamPaperDraft:
-        interaction = active_client.interactions.create(
-            model=get_model(model),
-            store=False,
-            input=inputs + ([{"type": "text", "text": extra}] if extra else []),
-            response_format={
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": ExamPaperDraft.model_json_schema(),
-            },
-        )
-        return ExamPaperDraft.model_validate_json(interaction.output_text)
+    def request(extra: str = "", *, attempts: int = 3) -> ExamPaperDraft:
+        last_exc: Exception | None = None
+        retry_note = extra
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                retry_note = (
+                    (extra + "\n\n" if extra else "")
+                    + "RETRY REQUIREMENT: The previous response was incomplete/truncated or invalid JSON. "
+                      "Return the COMPLETE JSON object from the beginning. Be substantially more concise. "
+                      "Do not emit sampled graph point arrays. Use at most 3 solution steps per part and terse marking descriptions. "
+                      "Do not add commentary outside JSON."
+                )
+            try:
+                interaction = active_client.interactions.create(
+                    model=get_model(model),
+                    store=False,
+                    input=inputs + ([{"type": "text", "text": retry_note}] if retry_note else []),
+                    response_format={
+                        "type": "text",
+                        "mime_type": "application/json",
+                        "schema": ExamPaperDraft.model_json_schema(),
+                    },
+                )
+                raw = str(interaction.output_text or "").strip()
+                if not raw:
+                    raise ValueError("Gemini returned an empty JSON response.")
+                return ExamPaperDraft.model_validate_json(raw)
+            except Exception as exc:
+                last_exc = exc
+                message = str(exc).lower()
+                retryable_json = any(
+                    token in message
+                    for token in (
+                        "invalid json",
+                        "eof while parsing",
+                        "json_invalid",
+                        "unterminated",
+                        "expecting",
+                        "unexpected end",
+                    )
+                )
+                if attempt >= attempts or not retryable_json:
+                    break
+
+        assert last_exc is not None
+        raise last_exc
 
     try:
-        result = request()
+        result = request(attempts=3)
     except Exception as exc:
-        raise _translate_exception(exc) from exc
+        translated = _translate_exception(exc)
+        if "json" in str(exc).lower() or "eof" in str(exc).lower():
+            raise GeminiTutorError(
+                "Gemini returned an incomplete paper response. The app retried with a compact format but the response was still truncated. "
+                "Try reducing the number of main questions or generate without the marking scheme first.",
+                category="format",
+            ) from exc
+        raise translated from exc
 
     def audit_marks(draft: ExamPaperDraft) -> tuple[int, list[str]]:
         issues: list[str] = []
@@ -2092,7 +2143,7 @@ Return structured JSON only.
             "Return the complete corrected JSON object.\n- " + "\n- ".join(issues)
         )
         try:
-            result = request(correction)
+            result = request(correction, attempts=3)
         except Exception as exc:
             raise _translate_exception(exc) from exc
         _, issues = audit_marks(result)

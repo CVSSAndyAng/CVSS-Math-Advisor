@@ -518,7 +518,7 @@ _EQUATION_EDITOR_HTML = """
 
   <div class="omt-editor-actions">
     <button type="button" class="omt-add-step">＋ Add step</button>
-    <button type="button" class="omt-save-working">Save working</button>
+    <button type="button" class="omt-save-working">💾 Save working</button>
   </div>
   <div class="omt-editor-status" aria-live="polite"></div>
 </div>
@@ -719,16 +719,10 @@ export default async function(component) {{
   }};
 
   const scheduleEmit = () => {{
-    // Keep rapid typing and virtual-keyboard presses entirely inside the browser.
-    // Only sync to Streamlit after a genuine pause.
+    // Deliberately DO NOT call setStateValue() while typing. Any component update
+    // reruns Streamlit and can rebuild MathLive. Keep edits local until explicit save.
     captureLocal();
-    status.textContent = 'Editing…';
-    if (state.timer) clearTimeout(state.timer);
-    state.timer = setTimeout(() => {{
-      state.timer = null;
-      setStateValue('payload', state.payload);
-      status.textContent = 'Working saved';
-    }}, 3000);
+    status.textContent = 'Editing locally · tap Save working when finished';
   }};
 
   const showKeyboard = () => {{
@@ -794,7 +788,7 @@ export default async function(component) {{
       }});
       mf.addEventListener('input', scheduleEmit);
       mf.addEventListener('change', captureLocal);
-      mf.addEventListener('blur', emit);
+      mf.addEventListener('blur', captureLocal);
 
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -836,6 +830,10 @@ export default async function(component) {{
 
   keyboardButton.onclick = toggleKeyboard;
 
+  keyboardPanel.addEventListener('pointerdown', (event) => {{
+    if (event.target && event.target.closest('button')) event.preventDefault();
+  }});
+
   parentElement.querySelectorAll('button[data-kb]').forEach(button => {{
     button.onclick = () => {{
       const mf = currentField(); if (!mf) return;
@@ -844,7 +842,7 @@ export default async function(component) {{
       try {{ mf.insert(latex, {{ insertionMode:'replaceSelection', selectionMode:'placeholder' }}); }}
       catch (_) {{ try {{ mf.executeCommand(['insert',latex]); }} catch (_) {{}} }}
       captureLocal();
-      status.textContent = 'Editing…';
+      status.textContent = 'Editing locally · tap Save working when finished';
     }};
   }});
 
@@ -852,7 +850,7 @@ export default async function(component) {{
     const mf=currentField(); if(!mf) return; mf.focus();
     try {{ mf.executeCommand('deleteBackward'); }} catch(_) {{}}
     captureLocal();
-    status.textContent = 'Editing…';
+    status.textContent = 'Editing locally · tap Save working when finished';
   }};
 
   keyboardClose.onclick = hideKeyboard;
@@ -1089,7 +1087,7 @@ except Exception:
 
 
 def equation_working_editor(label: str, *, key: str) -> tuple[list[str], list[str]]:
-    """Render a visual multi-step MathLive editor and return LaTeX + ASCIIMath lines."""
+    """Render MathLive working and persist the last saved payload across Streamlit reruns."""
     if _equation_editor_component is None:
         fallback = st.text_area(
             label,
@@ -1100,12 +1098,21 @@ def equation_working_editor(label: str, *, key: str) -> tuple[list[str], list[st
         lines = [line.strip() for line in fallback.splitlines() if line.strip()]
         return lines, lines
 
-    prior = st.session_state.get(key, {})
-    payload = prior.get("payload", {"latex": [""], "ascii": [""]}) if isinstance(prior, dict) else {"latex": [""], "ascii": [""]}
+    # IMPORTANT: component state and Python widget state are not the same thing.
+    # Keep a separate shadow payload so a component-triggered rerun cannot feed an
+    # older/default value back into MathLive and erase what the student just saved.
+    shadow_key = f"{key}__saved_payload"
+    payload = st.session_state.get(shadow_key, {"latex": [""], "ascii": [""]})
     if not isinstance(payload, dict):
         payload = {"latex": [""], "ascii": [""]}
-    payload.setdefault("latex", [""])
-    payload.setdefault("ascii", [""])
+    payload = {
+        "latex": [str(x) for x in (payload.get("latex") or [""])],
+        "ascii": [str(x) for x in (payload.get("ascii") or [""])],
+    }
+    if not payload["latex"]:
+        payload["latex"] = [""]
+    while len(payload["ascii"]) < len(payload["latex"]):
+        payload["ascii"].append("")
 
     result = _equation_editor_component(
         data={"label": label, "payload": payload},
@@ -1115,12 +1122,28 @@ def equation_working_editor(label: str, *, key: str) -> tuple[list[str], list[st
         width="stretch",
         height="content",
     )
-    output = getattr(result, "payload", None) or payload
-    latex = [str(x).strip() for x in output.get("latex", [])]
-    ascii_values = [str(x).strip() for x in output.get("ascii", [])]
+
+    returned = getattr(result, "payload", None)
+    if isinstance(returned, dict):
+        saved = {
+            "latex": [str(x) for x in (returned.get("latex") or [""])],
+            "ascii": [str(x) for x in (returned.get("ascii") or [""])],
+        }
+        if not saved["latex"]:
+            saved["latex"] = [""]
+        while len(saved["ascii"]) < len(saved["latex"]):
+            saved["ascii"].append("")
+        # Persist the payload that caused this rerun. On the next render it becomes
+        # the authoritative input instead of the old/default component value.
+        st.session_state[shadow_key] = saved
+        payload = saved
+
+    latex = [str(x).strip() for x in payload.get("latex", [])]
+    ascii_values = [str(x).strip() for x in payload.get("ascii", [])]
     while len(ascii_values) < len(latex):
         ascii_values.append("")
     return latex, ascii_values
+
 
 
 def working_input(
@@ -5350,7 +5373,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · paper rendering accuracy v2")
+    st.caption("Build 2026-08-18 · stable math save + compact paper JSON")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
