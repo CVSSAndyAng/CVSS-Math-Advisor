@@ -2400,44 +2400,107 @@ Return structured JSON only.
 
 
     # Mark distribution is flexible. Reconcile it locally before asking Gemini
-    # to regenerate anything. Diagram/structural issues remain strict.
+    # to regenerate anything.
     mark_notes = reconcile_marks(result)
     _, mark_issues = audit_marks(result)
     diagram_issues = audit_setter_diagrams(result)
 
-    # Only send a regeneration request for issues that remain after automatic
-    # reconciliation, or for diagram/structural errors.
+    # Ask Gemini once more to repair any genuinely structural or diagram mismatch.
+    # Mark allocation itself is already handled locally.
     issues = mark_issues + diagram_issues
     if issues:
         correction = (
             "Correct ONLY the remaining structural, mark-allocation, or diagram-consistency problems below. "
             "The overall requested mark total is authoritative, but the distribution of marks between questions "
-            "and parts is flexible. Do not preserve an arbitrary per-question mark total if changing it by one or "
-            "two marks produces a better-balanced paper. Preserve valid questions, wording and numbering. "
+            "and parts is flexible. Preserve valid questions, wording and numbering. "
             "For each diagram issue, rebuild the scene so it exactly matches the named points, circles, tangents, "
             "chords, intersections, functions and solids in the question. "
+            "If you cannot construct a reliable diagram, set both diagram_scene_2d and diagram_scene_3d to null "
+            "for that question instead of inventing an inaccurate figure. "
             "Return the complete corrected JSON object.\n- " + "\n- ".join(issues)
         )
         try:
             result = request(correction, attempts=3)
-        except Exception as exc:
-            raise _translate_exception(exc) from exc
+        except Exception:
+            # Keep the otherwise-valid draft. We will reconcile and sanitise locally below.
+            pass
 
         mark_notes.extend(reconcile_marks(result))
         _, mark_issues = audit_marks(result)
         diagram_issues = audit_setter_diagrams(result)
-        issues = mark_issues + diagram_issues
 
-    # Keep a short teacher-facing record of automatic mark normalisation.
-    if mark_notes:
-        existing = list(result.verification_notes or [])
-        existing.extend(mark_notes[:4])
-        result.verification_notes = existing
+    # ------------------------------------------------------------
+    # TOLERANT DIAGRAM POLICY
+    # ------------------------------------------------------------
+    # A missing/inaccurate generated diagram should not destroy an otherwise
+    # usable assessment paper. Remove only the unreliable diagram and keep the
+    # question, then tell the teacher exactly what was omitted.
+    diagram_notes: list[str] = []
 
-    if issues:
+    if diagram_issues:
+        by_question: dict[str, list[str]] = {}
+        for issue in diagram_issues:
+            match = re.match(r"Question\s+([^:]+):\s*(.*)", issue)
+            if match:
+                qnum = match.group(1).strip()
+                detail = match.group(2).strip()
+                by_question.setdefault(qnum, []).append(detail)
+
+        for q in result.questions:
+            qnum = str(q.question_number).strip()
+            if qnum not in by_question:
+                continue
+
+            details = by_question[qnum]
+
+            # Remove only the generated visual. Keep the mathematical question.
+            q.diagram_scene_2d = None
+            q.diagram_scene_3d = None
+
+            # Preserve a short specification for teacher awareness, but do not
+            # let the renderer display an inaccurate generated figure.
+            if not str(q.diagram_spec or "").strip():
+                q.diagram_spec = (
+                    "Diagram required by the question; automatic diagram generation "
+                    "was withheld because the scene could not be verified reliably."
+                )
+
+            diagram_notes.append(
+                f"Question {qnum}: generated diagram omitted pending teacher review "
+                f"({'; '.join(details)})."
+            )
+
+    # Re-audit after dropping unverified visuals. At this stage only genuine
+    # non-diagram structural failures are allowed to block generation.
+    _, remaining_mark_issues = audit_marks(result)
+
+    # Number-of-question/duplicate-number failures remain strict.
+    blocking_issues = [
+        issue
+        for issue in remaining_mark_issues
+        if (
+            issue.startswith("Duplicate question number")
+            or issue.startswith("Generated ")
+            or "has no question parts" in issue
+        )
+    ]
+
+    # Keep a teacher-facing record of every automatic adjustment.
+    verification_notes = list(result.verification_notes or [])
+    verification_notes.extend(mark_notes[:6])
+    verification_notes.extend(diagram_notes[:8])
+    if diagram_notes:
+        verification_notes.append(
+            "The assessment was generated successfully, but one or more automatically "
+            "generated diagrams were withheld because they could not be verified against "
+            "the question wording. Review or redraw those figures before formal use."
+        )
+    result.verification_notes = verification_notes
+
+    if blocking_issues:
         raise GeminiTutorError(
-            "The generated paper still has structural issues after automatic mark reconciliation: "
-            + "; ".join(issues[:8]),
+            "The generated paper still has non-repairable structural issues: "
+            + "; ".join(blocking_issues[:8]),
             category="format",
         )
 
