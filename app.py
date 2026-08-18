@@ -331,20 +331,106 @@ def _contains_raw_math_source(text: str) -> bool:
     return bool(re.search(r"\\(?:frac|sqrt|times|div|cdot|theta|alpha|beta|gamma|pi|sin|cos|tan|log|ln|leq|geq|neq|pm|text|overline|bar|angle|circ)\b|\^\{|_\{", text or ""))
 
 
-def render_mathio_mixed(text: str) -> None:
-    r"""Render prose and mathematics together in one natural, inline MathIO view.
 
-    This avoids the old stacked layout where every symbol/formula became a separate
-    Streamlit row. New Gemini responses delimit maths with \(...\) or \[...\].
-    """
+def _normalize_generated_math_text(value: str) -> str:
+    """Repair common generated maths artifacts before display."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"\\+(?:textbullet|bullet|dots|ldots|cdots)\b\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\.{3,}", "", text)
+
+    # Repair common text-maths leakage.
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*degrees\b", r"\1^{\\circ}", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bangle\s+([A-Z]{2,4})\b", r"\\angle \1", text)
+    text = re.sub(r"\btheta\b", r"\\theta", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bpi\b", r"\\pi", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<=\d)(cm|mm|km|kg|m|g|s)\b", r" \1", text)
+
+    # Repair fused English around mathematical tokens.
+    text = re.sub(r"(?i)(\^\{\\circ\})and(?=\\angle)", r"\1 and ", text)
+    text = re.sub(r"(?i)\band(?=\\angle)", "and ", text)
+
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+_AUTO_MATHIO_FRAGMENT_RE = re.compile(
+    r"""
+    (
+        \\angle\s*[A-Z]{2,4}
+        (?:\s*=\s*(?:\\angle\s*[A-Z]{2,4}|\d+(?:\.\d+)?\^\{?\\circ\}?|\\theta|\\alpha|\\beta|\\gamma))+
+        |
+        [A-Za-z][A-Za-z0-9_]*\s*=\s*[^,.;:\n]+
+        |
+        \([^()\n]{1,120}\)\^\{?[-+]?\d+\}?
+        |
+        (?<!\w)[A-Za-z0-9]+\^\{?[-+]?\d+\}?
+        |
+        \\frac\{[^{}\n]+\}\{[^{}\n]+\}
+        |
+        \\sqrt\{[^{}\n]+\}
+        |
+        \\(?:sin|cos|tan|log|ln)\s*(?:\\left)?\([^)\n]+(?:\\right)?\)
+        |
+        \\(?:pi|theta|alpha|beta|gamma)\b
+        |
+        (?<!\w)-?\d+(?:\.\d+)?\s*(?:cm|mm|m|km|g|kg|s|h|%)(?:\^2|\^3)?\b
+        |
+        (?<!\w)\d+(?:\.\d+)?\^\{?\\circ\}?
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+def _auto_mathio_markup(value: str) -> str:
+    """Wrap undelimited mathematical fragments in MathIO inline delimiters."""
+    text = _normalize_generated_math_text(value)
+    if not text:
+        return ""
+
+    if _MATHIO_MIXED_PATTERN.search(text):
+        return text
+
+    pieces: list[str] = []
+    cursor = 0
+    for match in _AUTO_MATHIO_FRAGMENT_RE.finditer(text):
+        if match.start() > cursor:
+            pieces.append(text[cursor:match.start()])
+        fragment = match.group(0).strip()
+        fragment = re.sub(r"\bsin\s*\(", r"\\sin(", fragment)
+        fragment = re.sub(r"\bcos\s*\(", r"\\cos(", fragment)
+        fragment = re.sub(r"\btan\s*\(", r"\\tan(", fragment)
+        pieces.append(r"\(" + fragment + r"\)")
+        cursor = match.end()
+
+    if cursor < len(text):
+        pieces.append(text[cursor:])
+
+    return "".join(pieces) if pieces else text
+
+
+def _latex_leak_detected(value: str) -> bool:
+    """True when raw maths source would otherwise be exposed as prose."""
+    return bool(
+        re.search(
+            r"\\(?:frac|sqrt|angle|theta|alpha|beta|gamma|pi|sin|cos|tan|log|ln|circ|times|div|leq|geq|pm)\b"
+            r"|\^\{?|_\{?",
+            value or "",
+        )
+    )
+
+
+def render_mathio_mixed(text: str) -> None:
+    """Render prose normally and every mathematical fragment through MathIO."""
     if not text:
         return
-    value = str(text).strip()
+
+    value = _auto_mathio_markup(str(text))
     if not value:
         return
 
-    # Preferred path: one browser component lays out prose + inline mathematics as a
-    # single paragraph/card, so expressions such as AB, 40° and tan(theta) stay inline.
     if _mathio_rich_component is not None and _MATHIO_MIXED_PATTERN.search(value):
         _mathio_rich_component(
             data={"text": value},
@@ -355,12 +441,14 @@ def render_mathio_mixed(text: str) -> None:
         )
         return
 
-    # Plain prose remains native Streamlit text. A source-heavy compatibility value from
-    # an older session is rendered as mathematics rather than exposing raw commands.
-    if _contains_raw_math_source(value):
-        render_mathio(value)
-    else:
-        st.markdown(value)
+    if _latex_leak_detected(value):
+        # Never expose raw LaTeX as ordinary markdown.
+        stripped = re.sub(r"\\\(|\\\)|\\\[|\\\]|\$\$", "", value)
+        render_mathio(stripped)
+        return
+
+    st.markdown(value)
+
 
 
 def render_math_text(text: str) -> None:
@@ -429,6 +517,49 @@ body { --keyboard-zindex: 999999; }
 @media (pointer: coarse) {
   .omt-editor-row math-field { min-height: 4rem; font-size: 1.2rem; padding: .7rem .75rem; }
   .omt-add-step, .omt-remove-step, .omt-math-toolbar button { min-height: 44px; min-width: 44px; }
+}
+
+/* Mobile/tablet equation editor improvements */
+.omt-math-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--st-background-color, #fff);
+  padding: .35rem 0;
+}
+.omt-keyboard-toggle { margin-left: auto; }
+
+@media (max-width: 640px), (pointer: coarse) {
+  .omt-editor-help { font-size: .92rem; }
+  .omt-math-toolbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    padding: .45rem 0 .55rem;
+  }
+  .omt-math-toolbar button {
+    flex: 0 0 auto;
+    min-width: 50px;
+    min-height: 50px;
+    font-size: 1rem;
+  }
+  .omt-math-toolbar .omt-keyboard-toggle {
+    position: sticky;
+    right: 0;
+    min-width: 145px;
+    background: var(--st-primary-color, #ff4b4b);
+    color: #fff;
+    border-color: var(--st-primary-color, #ff4b4b);
+  }
+  .omt-editor-row {
+    grid-template-columns: 42px minmax(0, 1fr) 48px;
+    gap: .35rem;
+  }
+  .omt-editor-row math-field {
+    min-height: 58px;
+    font-size: 1.18rem;
+  }
 }
 """
 
@@ -500,7 +631,11 @@ export default async function(component) {{
   parentElement.__omtState = state;
   state.payload = incoming;
 
-  const currentField = () => state.active && rows.contains(state.active) ? state.active : rows.querySelector('math-field');
+  const currentField = () => {{
+    const mf = state.active && rows.contains(state.active) ? state.active : rows.querySelector('math-field');
+    if (mf) state.active = mf;
+    return mf;
+  }};
 
   const emit = () => {{
     const editors = Array.from(rows.querySelectorAll('math-field'));
@@ -546,9 +681,22 @@ export default async function(component) {{
       const mf = document.createElement('math-field');
       mf.value = value || '';
       mf.mathVirtualKeyboardPolicy = 'manual';
+      try {{ mf.virtualKeyboardMode = 'manual'; }} catch (_) {{}}
+      mf.setAttribute('math-virtual-keyboard-policy', 'manual');
+      mf.setAttribute('virtual-keyboard-mode', 'manual');
       mf.setAttribute('smart-fence', '');
       mf.setAttribute('aria-label', `Mathematics working step ${{index + 1}}`);
-      mf.addEventListener('focusin', () => {{ state.active = mf; }});
+      mf.addEventListener('focusin', () => {{
+        state.active = mf;
+        const coarse = globalThis.matchMedia && globalThis.matchMedia('(pointer: coarse)').matches;
+        const narrow = globalThis.innerWidth <= 700;
+        if ((coarse || narrow) && vk) {{
+          setTimeout(() => {{
+            try {{ vk.show(); }} catch (_) {{ try {{ vk.visible = true; }} catch (_) {{}} }}
+            status.textContent = 'Math keyboard open';
+          }}, 80);
+        }}
+      }});
       mf.addEventListener('input', scheduleEmit);
       mf.addEventListener('change', emit);
       mf.addEventListener('blur', emit);
@@ -3061,7 +3209,7 @@ def render_guidance_step(step_number: int, value) -> None:
     with st.container(border=True):
         st.markdown(f"#### Step {step_number}")
         if explanation:
-            st.markdown(explanation)
+            render_mathio_mixed(explanation)
         for equation in equations:
             equation = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", equation)
             equation = re.sub(r"\.{3,}", "", equation)
@@ -3861,7 +4009,7 @@ def _append_omml_expression(parent, source: str) -> None:
 
 
 def append_word_math(paragraph, latex: str) -> None:
-    """Insert a native editable Word equation (OMML) into an existing paragraph."""
+    """Insert an editable Microsoft Word Equation Editor object. DOCX stores these internally as OMML."""
     source = str(latex or "").strip()
     if not source:
         return
@@ -3982,6 +4130,9 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
     r = p.add_run(draft.paper_title); r.bold = True; r.font.size = Pt(15)
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.add_run(f"{draft.track_label}    |    {draft.duration_minutes} minutes    |    {draft.total_marks} marks")
+    note = doc.add_paragraph(); note.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    rr = note.add_run("Mathematical expressions are editable using Microsoft Word Equation Editor.")
+    rr.italic = True; rr.font.size = Pt(8.5)
 
     if draft.instructions:
         doc.add_heading("Instructions", level=2)
@@ -4034,6 +4185,9 @@ def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
     r = p.add_run(draft.paper_title + " - Marking Scheme"); r.bold = True; r.font.size = Pt(14)
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.add_run(f"{draft.track_label} | Total: {draft.total_marks} marks")
+    eqnote = doc.add_paragraph(); eqnote.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    rr = eqnote.add_run("Mathematical expressions are editable using Microsoft Word Equation Editor.")
+    rr.italic = True; rr.font.size = Pt(8.5)
     doc.add_paragraph("AI-generated teacher draft. Recheck against departmental/official marking conventions before formal use.")
 
     for q in draft.questions:
@@ -4103,7 +4257,7 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
             # Stem prose can itself contain mathematical expressions, so use the
             # MathIO-aware mixed renderer rather than st.write().
             if str(q.stem_text or "").strip():
-                render_guidance_mixed_mathio(q.stem_text)
+                render_mathio_mixed(q.stem_text)
 
             # Explicit equation fields always render through MathIO.
             for eq in q.stem_equations:
@@ -4115,14 +4269,14 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
 
             if q.diagram_spec:
                 with st.expander("Diagram / figure information", expanded=False):
-                    render_guidance_mixed_mathio(q.diagram_spec)
+                    render_mathio_mixed(q.diagram_spec)
 
             for part in q.parts:
                 label = part.label or "Question"
                 st.markdown(f"#### {label} [{part.marks} marks]")
 
                 if str(part.prompt_text or "").strip():
-                    render_guidance_mixed_mathio(part.prompt_text)
+                    render_mathio_mixed(part.prompt_text)
 
                 for eq in part.equations:
                     eq_text = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", str(eq or ""))
@@ -4518,7 +4672,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · MathIO web + native Word equations")
+    st.caption("Build 2026-08-18 · mobile math keyboard + universal MathIO + Word Equation Editor")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
