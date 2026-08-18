@@ -347,6 +347,9 @@ def _normalize_generated_math_text(value: str) -> str:
     text = re.sub(r"(\d+(?:\.\d+)?)\s*degrees\b", r"\1^{\\circ}", text, flags=re.IGNORECASE)
     text = re.sub(r"\bangle\s+([A-Z]{2,4})\b", r"\\angle \1", text)
     text = re.sub(r"\btheta\b", r"\\theta", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\\)\barctan\s*\(", r"\\arctan(", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\\)\barcsin\s*\(", r"\\arcsin(", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<!\\)\barccos\s*\(", r"\\arccos(", text, flags=re.IGNORECASE)
     text = re.sub(r"\bpi\b", r"\\pi", text, flags=re.IGNORECASE)
     text = re.sub(r"(?<=\d)(cm|mm|km|kg|m|g|s)\b", r" \1", text)
 
@@ -361,7 +364,7 @@ _AUTO_MATHIO_FRAGMENT_RE = re.compile(
     r"""
     (
         \\angle\s*[A-Z]{2,4}
-        (?:\s*=\s*(?:\\angle\s*[A-Z]{2,4}|\d+(?:\.\d+)?\^\{?\\circ\}?|\\theta|\\alpha|\\beta|\\gamma))+
+        (?:\s*=\s*[^,.;:\n]+)+
         |
         [A-Za-z][A-Za-z0-9_]*\s*=\s*[^,.;:\n]+
         |
@@ -417,7 +420,7 @@ def _latex_leak_detected(value: str) -> bool:
     """True when raw maths source would otherwise be exposed as prose."""
     return bool(
         re.search(
-            r"\\(?:frac|sqrt|angle|theta|alpha|beta|gamma|pi|sin|cos|tan|log|ln|circ|times|div|leq|geq|pm)\b"
+            r"\\(?:frac|sqrt|angle|theta|alpha|beta|gamma|pi|sin|cos|tan|arcsin|arccos|arctan|log|ln|circ|times|div|leq|geq|pm)\b"
             r"|\^\{?|_\{?",
             value or "",
         )
@@ -3260,7 +3263,7 @@ def _looks_like_standalone_math(text: str) -> bool:
 
     words = re.findall(r"[A-Za-z]{3,}", value)
     math_signals = len(re.findall(
-        r"[=+\-×÷*/^]|\\(?:frac|sqrt|pi|theta|sin|cos|tan|log|ln)\b",
+        r"[=+\-×÷*/^]|\\(?:frac|sqrt|angle|pi|theta|sin|cos|tan|arcsin|arccos|arctan|log|ln)\b",
         value,
     ))
     # A short expression with strong mathematical syntax is safe for MathIO.
@@ -3279,7 +3282,9 @@ _INLINE_MATH_FRAGMENT_RE = re.compile(
         |
         [A-Za-z0-9]+\^\{?\d+\}?
         |
-        \\(?:frac|sqrt|pi|theta|sin|cos|tan|log|ln)\b[^,.;:]*
+        \\angle\s*[A-Z]{2,4}\s*=\s*[^,.;:]*
+        |
+        \\(?:frac|sqrt|pi|theta|sin|cos|tan|arcsin|arccos|arctan|log|ln)\b[^,.;:]*
     )
     """,
     re.VERBOSE,
@@ -3376,9 +3381,11 @@ def render_guidance_step(step_number: int, value) -> None:
     with st.container(border=True):
         st.markdown(f"#### Step {step_number}")
 
-        # explanation is always ordinary readable prose
+        # Explanation may occasionally contain a mathematical statement because
+        # model output is not perfectly channel-separated. The mixed renderer keeps
+        # ordinary English as text but automatically routes equations to MathIO.
         if explanation:
-            st.markdown(_plainify_embedded_math(explanation))
+            render_guidance_mixed_mathio(explanation)
 
         # equations are always MathIO
         for equation in equations:
@@ -5648,7 +5655,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Combined teacher workflow ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · strict text + MathIO channels")
+    st.caption("Build 2026-08-18 · forced MathIO worked-step detection")
     st.markdown('<div class="omt-section-kicker">Teacher assessment tools</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Paper setter, solutions & marking scheme</div>', unsafe_allow_html=True)
     teacher_workflow_mode = st.radio(

@@ -2842,6 +2842,12 @@ STRICT TEXT / MATH DISPLAY CHANNELS:
 - Never encode an English sentence as LaTeX or mathematical notation.
 - Example explanation: Measure angle QRS from the constructed figure using a protractor.
 - Example equations entry: \\angle QRS \\approx 122.6^{\\circ}
+
+
+MATHIO DISPLAY GUARANTEE:
+- Never place raw LaTeX/MathIO source visibly inside an English explanation.
+- Put standalone equations such as \angle QRS = \arctan(...) in the equations array.
+- If an explanation needs mathematics inline, keep the prose grammatical and keep the mathematical fragment concise.
 """
     question_assets = question_assets or []
     if not question_text.strip() and not question_assets:
