@@ -3358,11 +3358,7 @@ def guidance_item(value: str) -> None:
 
 
 def render_guidance_step(step_number: int, value) -> None:
-    """Render guided steps with prose and mathematics in separate channels.
-
-    New guided responses use GuidedStep(explanation, equations). Older cached string
-    steps remain supported for backwards compatibility.
-    """
+    """Keep prose in text mode and equations in MathIO mode."""
     if hasattr(value, "explanation"):
         explanation = clean_guidance_text(getattr(value, "explanation", ""))
         equations = [
@@ -3379,14 +3375,19 @@ def render_guidance_step(step_number: int, value) -> None:
 
     with st.container(border=True):
         st.markdown(f"#### Step {step_number}")
+
+        # explanation is always ordinary readable prose
         if explanation:
-            render_mathio_mixed(explanation)
+            st.markdown(_plainify_embedded_math(explanation))
+
+        # equations are always MathIO
         for equation in equations:
             equation = re.sub(r"\\+(?:dots|ldots|cdots)\b", "", equation)
             equation = re.sub(r"\.{3,}", "", equation)
             equation = re.sub(r"\s{2,}", " ", equation).strip()
             if equation:
                 render_mathio(equation)
+
 
 
 def _switch_guided_to_full() -> None:
@@ -5647,7 +5648,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Combined teacher workflow ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · tolerant diagram audit")
+    st.caption("Build 2026-08-18 · strict text + MathIO channels")
     st.markdown('<div class="omt-section-kicker">Teacher assessment tools</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Paper setter, solutions & marking scheme</div>', unsafe_allow_html=True)
     teacher_workflow_mode = st.radio(

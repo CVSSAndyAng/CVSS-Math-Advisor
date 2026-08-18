@@ -2834,7 +2834,15 @@ def generate_guided_solution(
 
     The question is independently verified first. The returned object contains the
     complete verified path, but the Streamlit UI reveals it progressively.
-    """
+    
+
+STRICT TEXT / MATH DISPLAY CHANNELS:
+- GuidedStep.explanation must contain ordinary English prose only.
+- GuidedStep.equations must contain every standalone mathematical expression, equation, angle statement, substitution and calculation.
+- Never encode an English sentence as LaTeX or mathematical notation.
+- Example explanation: Measure angle QRS from the constructed figure using a protractor.
+- Example equations entry: \\angle QRS \\approx 122.6^{\\circ}
+"""
     question_assets = question_assets or []
     if not question_text.strip() and not question_assets:
         raise GeminiTutorError("Provide the question as text or an upload.", category="input")
