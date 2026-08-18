@@ -5655,7 +5655,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Combined teacher workflow ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · forced MathIO worked-step detection")
+    st.caption("Build 2026-08-18 · offline practice MathIO")
     st.markdown('<div class="omt-section-kicker">Teacher assessment tools</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Paper setter, solutions & marking scheme</div>', unsafe_allow_html=True)
     teacher_workflow_mode = st.radio(
@@ -6669,8 +6669,15 @@ with practice_tab:
     else:
         st.markdown(f"### {official_topic_code(question.track, question.topic_code)} · {question.topic_name}")
         st.caption(f"{question.strand} · {question.difficulty}")
-        st.markdown(f'<div class="soft-card"><strong>{question.prompt}</strong></div>', unsafe_allow_html=True)
-        st.markdown(f"**Target skill:** {question.target_skill}")
+
+        # Offline practice uses the same MathIO rendering policy as the online tutor:
+        # prose remains readable text while every mathematical fragment is rendered
+        # through MathIO. Do not place raw expressions directly in Markdown/HTML.
+        with st.container(border=True):
+            render_guidance_mixed_mathio(question.prompt)
+
+        st.markdown("**Target skill:**")
+        render_guidance_mixed_mathio(question.target_skill)
 
         if st.button("Show next hint", key="show_hint"):
             st.session_state.hint_level = min(len(question.hints), st.session_state.hint_level + 1)
@@ -6704,9 +6711,12 @@ with practice_tab:
         st.markdown("---")
         reveal = st.checkbox("Reveal verified answer and worked solution", key="reveal_solution")
         if reveal:
-            st.markdown(f"**Answer:** {question.answer_display}")
+            st.markdown("**Answer**")
+            render_guidance_mixed_mathio(question.answer_display)
+            st.markdown("**Worked solution**")
             for i, line in enumerate(question.worked_solution, 1):
-                st.write(f"{i}. {line}")
+                st.caption(f"Step {i}")
+                render_guidance_mixed_mathio(line)
 
         cnext1, cnext2 = st.columns(2)
         with cnext1:
