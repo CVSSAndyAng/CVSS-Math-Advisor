@@ -3955,7 +3955,12 @@ def render_paper_question_solution(solution: PaperQuestionSolution) -> None:
         if solution.verification_note.strip():
             st.info(clean_guidance_text(solution.verification_note))
 
-        if getattr(solution, "diagram_scene_2d", None) is not None:
+        if getattr(solution, "diagram_scene_3d", None) is not None:
+            show_scene3d(
+                solution.diagram_scene_3d,
+                caption="3D diagram used in the worked solution",
+            )
+        elif getattr(solution, "diagram_scene_2d", None) is not None:
             show_scene2d(
                 solution.diagram_scene_2d,
                 caption="Diagram used in the worked solution",
@@ -4409,6 +4414,134 @@ def add_scene2d_to_word(doc: Document, scene, *, caption: str = "") -> None:
         pass
 
 
+
+def _project3d_point(x: float, y: float, z: float, *, scale: float = 1.0) -> tuple[float,float]:
+    """Stable exam-style isometric projection."""
+    # Horizontal x, depth z at 30 degrees, vertical y.
+    u = float(x) + 0.55 * float(z)
+    v = float(y) - 0.32 * float(z)
+    return (u*scale, v*scale)
+
+
+def _scene3d_wire_segments(scene):
+    """Return projected labelled line segments for vertices/edges and solid primitives."""
+    segs=[]
+    verts={str(getattr(v,"id","")):v for v in list(getattr(scene,"vertices",[]) or [])}
+
+    # Explicit edges are authoritative.
+    for e in list(getattr(scene,"edges",[]) or []):
+        a=verts.get(str(getattr(e,"start",""))); b=verts.get(str(getattr(e,"end","")))
+        if a and b:
+            segs.append((
+                _project3d_point(a.x,a.y,a.z),
+                _project3d_point(b.x,b.y,b.z),
+                str(getattr(e,"label","") or ""),
+                bool(getattr(e,"dashed",False)),
+            ))
+
+    # Boxes/cuboids.
+    for box in list(getattr(scene,"boxes",[]) or []):
+        cx,cy,cz=[float(v) for v in box.center]
+        hx=float(box.width)/2; hy=float(box.height)/2; hz=float(box.depth)/2
+        pts={}
+        for ix,sx in enumerate((-1,1)):
+            for iy,sy in enumerate((-1,1)):
+                for iz,sz in enumerate((-1,1)):
+                    pts[(ix,iy,iz)]=_project3d_point(cx+sx*hx,cy+sy*hy,cz+sz*hz)
+        for iy in (0,1):
+            for iz in (0,1): segs.append((pts[(0,iy,iz)],pts[(1,iy,iz)],"",False))
+        for ix in (0,1):
+            for iz in (0,1): segs.append((pts[(ix,0,iz)],pts[(ix,1,iz)],"",False))
+        for ix in (0,1):
+            for iy in (0,1): segs.append((pts[(ix,iy,0)],pts[(ix,iy,1)],"",False))
+
+    # Extruded prisms.
+    for ex in list(getattr(scene,"extrusions",[]) or []):
+        prof=list(getattr(ex,"profile",[]) or [])
+        if len(prof)>=3:
+            cx,cy,cz=[float(v) for v in ex.center]
+            d=float(ex.depth)/2
+            front=[]; back=[]
+            for uv in prof:
+                if len(uv)<2: continue
+                u,v=float(uv[0]),float(uv[1])
+                front.append(_project3d_point(cx+u,cy+v,cz-d))
+                back.append(_project3d_point(cx+u,cy+v,cz+d))
+            for ring in (front,back):
+                for i in range(len(ring)): segs.append((ring[i],ring[(i+1)%len(ring)],"",False))
+            for a,b in zip(front,back): segs.append((a,b,"",False))
+
+    return segs, verts
+
+
+def render_scene3d_png(scene, *, width: int=960, height: int=620, padding: int=60) -> bytes:
+    """Render a clear isometric 3D exam schematic to PNG."""
+    img=Image.new("RGB",(width,height),"white")
+    draw=ImageDraw.Draw(img)
+    font=ImageFont.load_default()
+    segs,verts=_scene3d_wire_segments(scene)
+
+    projected=[]
+    for a,b,label,dashed in segs: projected.extend([a,b])
+    for v in verts.values(): projected.append(_project3d_point(v.x,v.y,v.z))
+    if not projected:
+        buf=BytesIO(); img.save(buf,format="PNG"); return buf.getvalue()
+
+    xs=[p[0] for p in projected]; ys=[p[1] for p in projected]
+    xmin,xmax=min(xs),max(xs); ymin,ymax=min(ys),max(ys)
+    dx=max(1e-6,xmax-xmin); dy=max(1e-6,ymax-ymin)
+    scale=min((width-2*padding)/dx,(height-2*padding)/dy)
+
+    def screen(p):
+        x=padding+(p[0]-xmin)*scale
+        y=height-padding-(p[1]-ymin)*scale
+        return (int(round(x)),int(round(y)))
+
+    for a,b,label,dashed in segs:
+        pa,pb=screen(a),screen(b)
+        if dashed:
+            steps=12
+            for i in range(0,steps,2):
+                t1=i/steps; t2=min(1,(i+1)/steps)
+                aa=(int(pa[0]+(pb[0]-pa[0])*t1),int(pa[1]+(pb[1]-pa[1])*t1))
+                bb=(int(pa[0]+(pb[0]-pa[0])*t2),int(pa[1]+(pb[1]-pa[1])*t2))
+                draw.line([aa,bb],fill=(75,75,75),width=2)
+        else:
+            draw.line([pa,pb],fill=(30,30,30),width=3)
+        if label:
+            mx=(pa[0]+pb[0])//2; my=(pa[1]+pb[1])//2
+            draw.text((mx+5,my-15),label,fill=(20,20,20),font=font)
+
+    for v in verts.values():
+        p=screen(_project3d_point(v.x,v.y,v.z))
+        draw.ellipse([p[0]-3,p[1]-3,p[0]+3,p[1]+3],fill=(20,20,20))
+        if getattr(v,"label",""):
+            draw.text((p[0]+6,p[1]-13),str(v.label),fill=(20,20,20),font=font)
+
+    buf=BytesIO(); img.save(buf,format="PNG"); return buf.getvalue()
+
+
+def show_scene3d(scene, *, caption: str="") -> None:
+    if scene is None: return
+    try:
+        st.image(render_scene3d_png(scene),caption=caption or None,use_container_width=True)
+    except Exception as exc:
+        st.info("The 3D diagram could not be rendered reliably. "+str(exc))
+
+
+def add_scene3d_to_word(doc: Document, scene, *, caption: str="") -> None:
+    if scene is None: return
+    try:
+        png=render_scene3d_png(scene,width=1100,height=700)
+        p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+        p.add_run().add_picture(BytesIO(png),width=Cm(13.5))
+        if caption:
+            cp=doc.add_paragraph(caption); cp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            for rr in cp.runs: rr.italic=True; rr.font.size=Pt(8.5)
+    except Exception:
+        pass
+
+
 def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
     doc = Document()
     sec = doc.sections[0]
@@ -4444,7 +4577,13 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         append_word_mixed_math(p, q.stem_text)
         for eq in q.stem_equations:
             append_word_math(doc.add_paragraph(), eq)
-        if getattr(q, "diagram_scene_2d", None) is not None:
+        if getattr(q, "diagram_scene_3d", None) is not None:
+            add_scene3d_to_word(
+                doc,
+                q.diagram_scene_3d,
+                caption="3D diagram not necessarily drawn to scale unless stated otherwise.",
+            )
+        elif getattr(q, "diagram_scene_2d", None) is not None:
             add_scene2d_to_word(
                 doc,
                 q.diagram_scene_2d,
@@ -4494,7 +4633,9 @@ def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
 
     for q in draft.questions:
         doc.add_heading(f"Question {q.question_number}", level=2)
-        if getattr(q, "diagram_scene_2d", None) is not None:
+        if getattr(q, "diagram_scene_3d", None) is not None:
+            add_scene3d_to_word(doc, q.diagram_scene_3d, caption="Reference 3D diagram")
+        elif getattr(q, "diagram_scene_2d", None) is not None:
             add_scene2d_to_word(doc, q.diagram_scene_2d, caption="Reference diagram")
         table = doc.add_table(rows=1, cols=4)
         table.style = "Table Grid"
@@ -4571,7 +4712,12 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                 if eq_text:
                     render_mathio(eq_text)
 
-            if getattr(q, "diagram_scene_2d", None) is not None:
+            if getattr(q, "diagram_scene_3d", None) is not None:
+                show_scene3d(
+                    q.diagram_scene_3d,
+                    caption="3D/isometric diagram for this question (schematic unless stated otherwise)",
+                )
+            elif getattr(q, "diagram_scene_2d", None) is not None:
                 show_scene2d(
                     q.diagram_scene_2d,
                     caption="Diagram for this question (schematic unless stated otherwise)",
@@ -4981,7 +5127,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · stable local math editing")
+    st.caption("Build 2026-08-18 · accurate 2D graph + geometry + 3D diagrams")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(

@@ -768,10 +768,11 @@ class SetterPaperQuestion(BaseModel):
     diagram_spec: str = Field(default="", description="Concise diagram/table/graph specification when genuinely required")
     diagram_scene_2d: VisualScene2D | None = Field(
         default=None,
-        description=(
-            "Structured drawable diagram/graph for any question that requires a visual. "
-            "Use points, segments, polylines, circles, angles and axes. Null when no visual is required."
-        ),
+        description="Structured 2D geometry/graph scene. Null for non-visual or 3D-only questions.",
+    )
+    diagram_scene_3d: VisualScene3D | None = Field(
+        default=None,
+        description="Structured 3D solid/isometric scene for 3D geometry questions. Null otherwise.",
     )
     parts: list[SetterPaperPart]
     marks: int = Field(ge=1, le=30)
@@ -1971,12 +1972,18 @@ NON-NEGOTIABLE PAPER-SETTER RULES
 8. Use fresh, clean numbers and solve EVERY question yourself before returning it.
 9. Every part must be answerable from the information provided.
 10. DIAGRAM REQUIREMENT:
-    - If a question requires a geometry diagram, coordinate axes, graph, number line, construction, or other visual,
+    - If a question requires a 2D geometry diagram, coordinate axes, function graph, number line, construction, or other 2D visual,
       populate diagram_scene_2d with a complete drawable scene. Do not return only a prose diagram_spec.
+    - If the question gives a function to be graphed, diagram_scene_2d MUST contain a sampled polyline of the actual function,
+      not blank axes. Sample enough points to show its shape accurately over a sensible domain.
+    - If a question requires a 3D solid, prism, pyramid, cone, cylinder, sphere, cuboid or spatial geometry,
+      populate diagram_scene_3d using vertices/edges/faces and/or the available solid primitives.
     - Include every point/line/circle/curve/angle label that the student needs.
     - For graph or coordinate questions set show_axes=true and choose sensible x/y bounds.
-    - For geometry diagrams use a clear schematic; it need not be to scale unless the question explicitly requires scale.
-    - For 3D questions provide a clear 2D projected/isometric schematic using points and segments.
+    - For geometry diagrams, reproduce the mathematical relationships in the question: incidence, collinearity,
+      parallel/perpendicular lines, tangent points, chords, radii, equal lengths and angle locations. Never invent a generic polygon.
+    - Circle-geometry questions MUST include the actual circle plus the tangent/chords/radii required by the wording.
+    - For 3D questions use diagram_scene_3d rather than flattening the object into an arbitrary 2D polygon.
     - Set diagram_scene_2d=null only when no diagram materially helps or is required.
 11. ALL mathematical notation must be separated from prose wherever possible.
     - stem_text and prompt_text contain ordinary language only.
@@ -2184,8 +2191,10 @@ REQUIREMENTS
 14. Include common_errors only when genuinely useful.
 15. If the question requires a diagram, graph, coordinate axes, geometry construction or visual explanation,
     populate diagram_scene_2d with a clean drawable scene matching the actual question and solution.
-    Use show_axes=true for graph/coordinate questions. For 3D geometry, provide a clear projected/isometric 2D schematic.
-    Set diagram_scene_2d=null for genuinely non-visual questions.
+    Use show_axes=true for graph/coordinate questions and include the actual function curve as a sampled polyline.
+    Circle geometry must show the actual circle and correct tangent/chord/radius relationships.
+    For 3D geometry populate diagram_scene_3d with the actual solid/spatial configuration.
+    Set both diagram scenes null for genuinely non-visual questions.
 
 Return structured JSON only.
 """.strip()
