@@ -4542,6 +4542,28 @@ def add_scene3d_to_word(doc: Document, scene, *, caption: str="") -> None:
         pass
 
 
+def apply_word_tnr11(document: Document) -> None:
+    """Force Times New Roman 11 pt across normal text and table content."""
+    for paragraph in document.paragraphs:
+        for run in paragraph.runs:
+            run.font.name = "Times New Roman"
+            run.font.size = Pt(11)
+            run._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+            run._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
+            run._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
+
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.name = "Times New Roman"
+                        run.font.size = Pt(11)
+                        run._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+                        run._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
+                        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
+
+
 def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
     doc = Document()
     sec = doc.sections[0]
@@ -4549,8 +4571,18 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
     sec.left_margin = Cm(1.8); sec.right_margin = Cm(1.8)
 
     styles = doc.styles
-    styles["Normal"].font.name = "Arial"
-    styles["Normal"].font.size = Pt(10.5)
+    styles["Normal"].font.name = "Times New Roman"
+    styles["Normal"].font.size = Pt(11)
+    styles["Normal"]._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+    styles["Normal"]._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
+    styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
+    for heading_name, heading_size in [("Title", 15), ("Heading 1", 14), ("Heading 2", 12)]:
+        if heading_name in styles:
+            styles[heading_name].font.name = "Times New Roman"
+            styles[heading_name].font.size = Pt(heading_size)
+            styles[heading_name]._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+            styles[heading_name]._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
+            styles[heading_name]._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -4570,6 +4602,7 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
             append_word_mixed_math(ip, item)
 
     doc.add_paragraph()
+    figure_number = 0
     for q in draft.questions:
         p = doc.add_paragraph()
         p.paragraph_format.space_before = Pt(8)
@@ -4578,16 +4611,18 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         for eq in q.stem_equations:
             append_word_math(doc.add_paragraph(), eq)
         if getattr(q, "diagram_scene_3d", None) is not None:
+            figure_number += 1
             add_scene3d_to_word(
                 doc,
                 q.diagram_scene_3d,
-                caption="3D diagram not necessarily drawn to scale unless stated otherwise.",
+                caption=f"Figure {figure_number}",
             )
         elif getattr(q, "diagram_scene_2d", None) is not None:
+            figure_number += 1
             add_scene2d_to_word(
                 doc,
                 q.diagram_scene_2d,
-                caption="Diagram not necessarily drawn to scale unless stated otherwise.",
+                caption=f"Figure {figure_number}",
             )
         elif q.diagram_spec:
             box = doc.add_paragraph()
@@ -4620,7 +4655,7 @@ def _set_cell_shading(cell, fill: str) -> None:
 
 def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
     doc = Document()
-    doc.styles["Normal"].font.name = "Arial"; doc.styles["Normal"].font.size = Pt(9.5)
+    doc.styles["Normal"].font.name = "Times New Roman"; doc.styles["Normal"].font.size = Pt(9.5)
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r = p.add_run((draft.school_name or "School Mathematics Department") + "\n"); r.bold = True
     r = p.add_run(draft.paper_title + " - Marking Scheme"); r.bold = True; r.font.size = Pt(14)
@@ -4631,12 +4666,15 @@ def build_setter_marking_scheme_docx(draft: ExamPaperDraft) -> bytes:
     rr.italic = True; rr.font.size = Pt(8.5)
     doc.add_paragraph("AI-generated teacher draft. Recheck against departmental/official marking conventions before formal use.")
 
+    figure_number = 0
     for q in draft.questions:
         doc.add_heading(f"Question {q.question_number}", level=2)
         if getattr(q, "diagram_scene_3d", None) is not None:
-            add_scene3d_to_word(doc, q.diagram_scene_3d, caption="Reference 3D diagram")
+            figure_number += 1
+            add_scene3d_to_word(doc, q.diagram_scene_3d, caption=f"Figure {figure_number}")
         elif getattr(q, "diagram_scene_2d", None) is not None:
-            add_scene2d_to_word(doc, q.diagram_scene_2d, caption="Reference diagram")
+            figure_number += 1
+            add_scene2d_to_word(doc, q.diagram_scene_2d, caption=f"Figure {figure_number}")
         table = doc.add_table(rows=1, cols=4)
         table.style = "Table Grid"
         headers = ["Answer", "Marks", "Partial Marks", "Guidance"]
@@ -4691,6 +4729,7 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
     st.markdown("---")
     st.markdown("## Question paper")
 
+    figure_number = 0
     for q in draft.questions:
         with st.container(border=True):
             st.markdown(
@@ -4713,14 +4752,16 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                     render_mathio(eq_text)
 
             if getattr(q, "diagram_scene_3d", None) is not None:
+                figure_number += 1
                 show_scene3d(
                     q.diagram_scene_3d,
-                    caption="3D/isometric diagram for this question (schematic unless stated otherwise)",
+                    caption=f"Figure {figure_number}",
                 )
             elif getattr(q, "diagram_scene_2d", None) is not None:
+                figure_number += 1
                 show_scene2d(
                     q.diagram_scene_2d,
-                    caption="Diagram for this question (schematic unless stated otherwise)",
+                    caption=f"Figure {figure_number}",
                 )
             elif q.diagram_spec:
                 with st.expander("Diagram / figure information", expanded=False):
@@ -5127,7 +5168,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · accurate 2D graph + geometry + 3D diagrams")
+    st.caption("Build 2026-08-18 · sequential Figure numbering")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
