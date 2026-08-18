@@ -2071,7 +2071,7 @@ NON-NEGOTIABLE PAPER-SETTER RULES
     - Put formulas, equations, expressions, coordinates, powers, roots, fractions, inequalities,
       function definitions, units attached to symbolic quantities, and symbolic answers in the equations arrays.
     - final_answer_mathio contains the symbolic final answer.
-    - For vectors, use standard equation-field notation such as \overrightarrow{OA}=6a.
+    - For vectors, use standard equation-field notation such as \\overrightarrow{{OA}}=6a.
       Never spell source commands as ordinary words such as overrightarrow, quad, sqrt or frac.
     - Do not place raw LaTeX commands inside prose fields.
     This is required so the web app renders mathematics with MathIO and Word exports create native editable equations.
