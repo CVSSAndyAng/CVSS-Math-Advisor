@@ -516,6 +516,7 @@ _EQUATION_EDITOR_HTML = """
 
   <div class="omt-editor-actions">
     <button type="button" class="omt-add-step">＋ Add step</button>
+    <button type="button" class="omt-save-working">Save working</button>
   </div>
   <div class="omt-editor-status" aria-live="polite"></div>
 </div>
@@ -549,7 +550,7 @@ body { --keyboard-zindex: 999999; }
 }
 @media (pointer: coarse) {
   .omt-editor-row math-field { min-height: 4rem; font-size: 1.2rem; padding: .7rem .75rem; }
-  .omt-add-step, .omt-remove-step, .omt-math-toolbar button { min-height: 44px; min-width: 44px; }
+  .omt-add-step, .omt-save-working, .omt-remove-step, .omt-math-toolbar button { min-height: 44px; min-width: 44px; }
 }
 
 /* Mobile/tablet equation editor improvements */
@@ -629,6 +630,7 @@ export default async function(component) {{
   const label = parentElement.querySelector('.omt-editor-label');
   const rows = parentElement.querySelector('.omt-editor-rows');
   const addButton = parentElement.querySelector('.omt-add-step');
+  const saveButton = parentElement.querySelector('.omt-save-working');
   const status = parentElement.querySelector('.omt-editor-status');
   const toolbar = parentElement.querySelector('.omt-math-toolbar');
   const keyboardButton = parentElement.querySelector('.omt-keyboard-toggle');
@@ -680,7 +682,14 @@ export default async function(component) {{
     keyboardOpen: false,
   }};
   parentElement.__omtState = state;
-  state.payload = incoming;
+
+  // Only accept Streamlit's incoming payload on the first render. On subsequent
+  // rerenders, the browser-local payload is newer and must win, otherwise a delayed
+  // save can restore stale values and appear to "reset" the student's typing.
+  if (!state.initialized) {{
+    state.payload = incoming;
+    state.initialized = true;
+  }}
   if (typeof state.keyboardOpen !== 'boolean') state.keyboardOpen = false;
 
   const currentField = () => {{
@@ -689,20 +698,35 @@ export default async function(component) {{
     return mf;
   }};
 
-  const emit = () => {{
+  const captureLocal = () => {{
     const editors = Array.from(rows.querySelectorAll('math-field'));
     state.payload = {{
       latex: editors.map(mf => mf.value || ''),
       ascii: editors.map(mf => {{ try {{ return mf.getValue('ascii-math') || ''; }} catch (_) {{ return ''; }} }})
     }};
+  }};
+
+  const emit = () => {{
+    captureLocal();
+    if (state.timer) {{
+      clearTimeout(state.timer);
+      state.timer = null;
+    }}
     setStateValue('payload', state.payload);
     status.textContent = 'Working saved';
   }};
 
   const scheduleEmit = () => {{
+    // Keep rapid typing and virtual-keyboard presses entirely inside the browser.
+    // Only sync to Streamlit after a genuine pause.
+    captureLocal();
     status.textContent = 'Editing…';
     if (state.timer) clearTimeout(state.timer);
-    state.timer = setTimeout(emit, 1400);
+    state.timer = setTimeout(() => {{
+      state.timer = null;
+      setStateValue('payload', state.payload);
+      status.textContent = 'Working saved';
+    }}, 3000);
   }};
 
   const showKeyboard = () => {{
@@ -767,7 +791,7 @@ export default async function(component) {{
         }}
       }});
       mf.addEventListener('input', scheduleEmit);
-      mf.addEventListener('change', emit);
+      mf.addEventListener('change', captureLocal);
       mf.addEventListener('blur', emit);
 
       const remove = document.createElement('button');
@@ -777,6 +801,7 @@ export default async function(component) {{
       remove.title = 'Remove this step';
       remove.disabled = state.payload.latex.length <= 1;
       remove.onclick = () => {{
+        captureLocal();
         if (state.payload.latex.length <= 1) return;
         state.payload.latex.splice(index, 1);
         state.payload.ascii.splice(index, 1);
@@ -816,19 +841,35 @@ export default async function(component) {{
       const latex = button.dataset.kb || '';
       try {{ mf.insert(latex, {{ insertionMode:'replaceSelection', selectionMode:'placeholder' }}); }}
       catch (_) {{ try {{ mf.executeCommand(['insert',latex]); }} catch (_) {{}} }}
-      scheduleEmit();
+      captureLocal();
+      status.textContent = 'Editing…';
     }};
   }});
 
   keyboardBackspace.onclick = () => {{
     const mf=currentField(); if(!mf) return; mf.focus();
     try {{ mf.executeCommand('deleteBackward'); }} catch(_) {{}}
-    scheduleEmit();
+    captureLocal();
+    status.textContent = 'Editing…';
   }};
 
   keyboardClose.onclick = hideKeyboard;
 
+  if (saveButton) {{
+    saveButton.onclick = () => {{
+      emit();
+      const mf = currentField();
+      if (mf) {{
+        state.active = mf;
+        setTimeout(() => {{
+          try {{ mf.focus({{ preventScroll: true }}); }} catch (_) {{ try {{ mf.focus(); }} catch (_) {{}} }}
+        }}, 0);
+      }}
+    }};
+  }};
+
   addButton.onclick = () => {{
+    captureLocal();
     if (state.payload.latex.length >= 20) {{ status.textContent = 'Maximum 20 working steps.'; return; }}
     state.payload.latex.push('');
     state.payload.ascii.push('');
@@ -4940,7 +4981,7 @@ st.session_state.setdefault("setter_reference_signature", "")
 
 # ---------- Teacher paper setter ----------
 with setter_tab:
-    st.caption("Build 2026-08-18 · persistent mobile math keyboard")
+    st.caption("Build 2026-08-18 · stable local math editing")
     st.markdown('<div class="omt-section-kicker">Teacher assessment design</div>', unsafe_allow_html=True)
     st.markdown('<div class="omt-section-title">Set a new Mathematics paper</div>', unsafe_allow_html=True)
     st.write(
