@@ -69,6 +69,188 @@ from offline_engine import (
 )
 
 
+# ---------------------------------------------------------------------------
+# GeoGebra external graph renderer
+# ---------------------------------------------------------------------------
+# GeoGebra is loaded in the browser from its official deployggb.js endpoint.
+# The mathematical expression is passed as data (not injected into HTML/JS).
+# The component exports the active Graphics View back to Python as PNG base64.
+_GEOGEBRA_COMPONENT = None
+_GEOGEBRA_COMPONENT_AVAILABLE = False
+
+try:
+    if hasattr(st, "components") and hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
+        _GEOGEBRA_COMPONENT = st.components.v2.component(
+            "math_advisor_geogebra_graph_capture",
+            html="""
+                <div class="math-advisor-ggb">
+                    <div class="ggb-canvas"></div>
+                    <div class="ggb-note">Loading GeoGebra graph…</div>
+                </div>
+            """,
+            css="""
+                .math-advisor-ggb {
+                    width: 100%;
+                    font-family: var(--st-font);
+                    color: var(--st-text-color);
+                }
+                .ggb-canvas {
+                    width: 100%;
+                    min-height: 430px;
+                    background: white;
+                    border: 1px solid rgba(49, 51, 63, .16);
+                    border-radius: 8px;
+                    overflow: hidden;
+                }
+                .ggb-note {
+                    margin-top: .35rem;
+                    font-size: .82rem;
+                    color: var(--st-secondary-text-color);
+                }
+            """,
+            js=r"""
+                function loadScriptOnce(src) {
+                    return new Promise((resolve, reject) => {
+                        if (window.GGBApplet) {
+                            resolve();
+                            return;
+                        }
+                        const existing = document.querySelector(`script[data-math-advisor-ggb="${src}"]`);
+                        if (existing) {
+                            existing.addEventListener("load", resolve, {once: true});
+                            existing.addEventListener("error", reject, {once: true});
+                            return;
+                        }
+                        const script = document.createElement("script");
+                        script.src = src;
+                        script.async = true;
+                        script.dataset.mathAdvisorGgb = src;
+                        script.onload = resolve;
+                        script.onerror = reject;
+                        document.head.appendChild(script);
+                    });
+                }
+
+                export default async function(component) {
+                    const { parentElement, data, setStateValue } = component;
+                    const root = parentElement.querySelector(".ggb-canvas");
+                    const note = parentElement.querySelector(".ggb-note");
+                    if (!root || !data) return;
+
+                    const signature = String(data.signature || "");
+                    if (root.dataset.signature === signature && root.dataset.ready === "true") {
+                        return;
+                    }
+                    root.dataset.signature = signature;
+                    root.dataset.ready = "false";
+                    root.innerHTML = "";
+                    note.textContent = "Loading GeoGebra graph…";
+
+                    try {
+                        await loadScriptOnce("https://www.geogebra.org/apps/deployggb.js");
+
+                        const width = Math.max(620, Math.floor(root.getBoundingClientRect().width || 760));
+                        const height = Number(data.height || 450);
+
+                        const params = {
+                            appName: "graphing",
+                            width,
+                            height,
+                            showToolBar: false,
+                            showAlgebraInput: false,
+                            showMenuBar: false,
+                            showResetIcon: false,
+                            enableRightClick: false,
+                            enableLabelDrags: false,
+                            enableShiftDragZoom: true,
+                            language: "en",
+                            appletOnLoad: function(api) {
+                                try {
+                                    api.setErrorDialogsActive(false);
+                                    api.setCoordSystem(
+                                        Number(data.xmin),
+                                        Number(data.xmax),
+                                        Number(data.ymin),
+                                        Number(data.ymax)
+                                    );
+                                    api.setAxesVisible(true, true);
+                                    api.setGridVisible(Boolean(data.grid));
+
+                                    const commands = Array.isArray(data.commands) ? data.commands : [];
+                                    let ok = commands.length > 0;
+                                    commands.forEach((cmd) => {
+                                        const success = api.evalCommand(String(cmd));
+                                        ok = ok && Boolean(success);
+                                    });
+
+                                    if (!ok) {
+                                        note.textContent = "GeoGebra could not evaluate one or more functions. Local graph fallback will be used.";
+                                        setStateValue("capture", {
+                                            ok: false,
+                                            status: "eval_failed",
+                                            signature,
+                                            png_base64: ""
+                                        });
+                                        return;
+                                    }
+
+                                    // Allow the graphics view to paint before exporting.
+                                    window.setTimeout(() => {
+                                        try {
+                                            const png = api.getPNGBase64(2, false, 300);
+                                            if (!png) throw new Error("Empty PNG export");
+                                            root.dataset.ready = "true";
+                                            note.textContent = "GeoGebra graph captured for the generated paper.";
+                                            setStateValue("capture", {
+                                                ok: true,
+                                                status: "captured",
+                                                signature,
+                                                png_base64: png
+                                            });
+                                        } catch (exportError) {
+                                            note.textContent = "GeoGebra export failed. Local graph fallback will be used.";
+                                            setStateValue("capture", {
+                                                ok: false,
+                                                status: "export_failed",
+                                                signature,
+                                                png_base64: ""
+                                            });
+                                        }
+                                    }, 550);
+                                } catch (apiError) {
+                                    note.textContent = "GeoGebra graph construction failed. Local graph fallback will be used.";
+                                    setStateValue("capture", {
+                                        ok: false,
+                                        status: "construction_failed",
+                                        signature,
+                                        png_base64: ""
+                                    });
+                                }
+                            }
+                        };
+
+                        const applet = new window.GGBApplet(params, true);
+                        applet.inject(root);
+                    } catch (loadError) {
+                        note.textContent = "GeoGebra is unavailable. Local graph fallback will be used.";
+                        setStateValue("capture", {
+                            ok: false,
+                            status: "load_failed",
+                            signature,
+                            png_base64: ""
+                        });
+                    }
+                }
+            """,
+        )
+        _GEOGEBRA_COMPONENT_AVAILABLE = True
+except Exception:
+    _GEOGEBRA_COMPONENT = None
+    _GEOGEBRA_COMPONENT_AVAILABLE = False
+
+
+
+
 # 2027 Singapore-Cambridge Secondary Education Certificate (SEC) mathematics tracks.
 # SEAB 2027 subject codes:
 # G1 Mathematics K110; G2 Mathematics K210; G3 Mathematics K310;
@@ -220,6 +402,28 @@ p, li { line-height: 1.58; }
 .omt-section-title { font-size:1.45rem; font-weight:780; letter-spacing:-.025em; margin:.08rem 0 .25rem; }
 .omt-section-copy { color:var(--omt-muted); margin-bottom:.9rem; }
 
+/* Offline practice: keep instruction text and MathIO expression compact. */
+[data-testid="stVerticalBlockBorderWrapper"] h1,
+[data-testid="stVerticalBlockBorderWrapper"] h2,
+[data-testid="stVerticalBlockBorderWrapper"] h3,
+[data-testid="stVerticalBlockBorderWrapper"] h4,
+[data-testid="stVerticalBlockBorderWrapper"] p {
+  margin-bottom: .25rem;
+}
+[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCustomComponentV1"] {
+  margin-top: 0 !important;
+  margin-bottom: .15rem !important;
+}
+
+[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCustomComponentV1"] {
+  margin-top: .05rem !important;
+  margin-bottom: .05rem !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"] p {
+  margin-top: .15rem;
+  margin-bottom: .3rem;
+}
+
 .omt-focus-card {
   background: linear-gradient(145deg, #ffffff, #fbfcff);
   border: 1px solid #dfe4ee;
@@ -271,6 +475,27 @@ button[data-baseweb="tab"][aria-selected="true"] { background:#eef2ff; color:#33
 @media (pointer: coarse) {
   button, [role="button"] { min-height:46px; }
   input, textarea, select { font-size:16px !important; }
+}
+
+/* Generic question text/MathIO segmentation */
+[data-testid="stVerticalBlockBorderWrapper"] p {
+  margin-top: .08rem !important;
+  margin-bottom: .16rem !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCustomComponentV1"] {
+  margin-top: -.12rem !important;
+  margin-bottom: .08rem !important;
+}
+
+/* Compact mixed question layout: avoid one Streamlit row per short maths fragment. */
+[data-testid="stVerticalBlockBorderWrapper"] p {
+  margin-top: 0 !important;
+  margin-bottom: .22rem !important;
+  line-height: 1.55 !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCustomComponentV1"] {
+  margin-top: .05rem !important;
+  margin-bottom: .12rem !important;
 }
 </style>
 """,
@@ -3068,7 +3293,20 @@ def reset_current_question() -> None:
 def make_new_question(track: str, topic: str, difficulty: str) -> None:
     seed = int(datetime.now().timestamp() * 1000) + st.session_state.seed_counter
     st.session_state.seed_counter += 1
-    st.session_state.question = generate_question(track, topic, difficulty, seed=seed)
+    previous = st.session_state.get("question")
+    candidate = generate_question(track, topic, difficulty, seed=seed)
+    # Avoid showing the same template family repeatedly when alternatives exist.
+    for offset in range(1, 7):
+        if not (
+            previous is not None
+            and getattr(previous, "track", None) == track
+            and getattr(previous, "topic_code", None) == topic
+            and getattr(previous, "family", "")
+            and getattr(candidate, "family", "") == getattr(previous, "family", "")
+        ):
+            break
+        candidate = generate_question(track, topic, difficulty, seed=seed + 7919 * offset)
+    st.session_state.question = candidate
     reset_current_question()
 
 
@@ -4638,6 +4876,214 @@ def _extract_y_functions(question) -> list[tuple[str, object]]:
     return found
 
 
+def _geogebra_safe_expression(expr: str) -> str | None:
+    """Convert a generated function expression to a conservative GeoGebra input."""
+    value = str(expr or "").strip()
+    if not value:
+        return None
+
+    # Convert common MathIO/LaTeX notation to GeoGebra input syntax.
+    replacements = {
+        r"\pi": "pi",
+        "π": "pi",
+        r"\theta": "theta",
+        r"\cdot": "*",
+        r"\times": "*",
+        "×": "*",
+        "÷": "/",
+        r"\left": "",
+        r"\right": "",
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+
+    # A few common fraction forms. Nested fractions continue to use local fallback.
+    for _ in range(4):
+        new_value = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"((\1)/(\2))", value)
+        if new_value == value:
+            break
+        value = new_value
+
+    value = re.sub(r"\^\{([^{}]+)\}", r"^(\1)", value)
+    value = re.sub(r"\bsqrt\s*\{([^{}]+)\}", r"sqrt(\1)", value, flags=re.I)
+    value = re.sub(r"\\sqrt\{([^{}]+)\}", r"sqrt(\1)", value)
+    value = re.sub(r"\s+", " ", value).strip()
+
+    # Insert multiplication in common textbook forms: 3x, 2(x+1), )( .
+    value = re.sub(r"(?<=\d)(?=[A-Za-z(])", "*", value)
+    value = re.sub(r"(?<=[A-Za-z)])(?=\()", "*", value)
+
+    # Whitelist only ordinary graphing syntax. Never send arbitrary LLM text as a command.
+    if not re.fullmatch(r"[A-Za-z0-9_+\-*/^().,\s]+", value):
+        return None
+
+    return value
+
+
+def _question_graph_spec(question) -> dict | None:
+    """Return sanitized GeoGebra commands and a sensible view for y=f(x) questions."""
+    funcs = _extract_y_functions(question)
+    if not funcs:
+        return None
+
+    expressions = []
+    functions = []
+    for expr, fn in funcs:
+        safe = _geogebra_safe_expression(expr)
+        if not safe:
+            continue
+        expressions.append(safe)
+        functions.append(fn)
+
+    if not expressions:
+        return None
+
+    scene = getattr(question, "diagram_scene_2d", None)
+    text = " ".join(_question_equation_sources(question)).lower()
+    is_trig = any(token in text for token in ("sin", "cos", "tan", "trigonometric"))
+
+    # Prefer question-specified scene bounds. Trig defaults show multiple periods.
+    if scene is not None:
+        xmin = float(getattr(scene, "x_min", -6.5 if is_trig else -5) or (-6.5 if is_trig else -5))
+        xmax = float(getattr(scene, "x_max", 6.5 if is_trig else 5) or (6.5 if is_trig else 5))
+    else:
+        xmin, xmax = ((-2 * math.pi, 2 * math.pi) if is_trig else (-5.0, 5.0))
+
+    if xmax <= xmin:
+        xmin, xmax = (-2 * math.pi, 2 * math.pi) if is_trig else (-5.0, 5.0)
+
+    # Sample locally only to choose a useful y-view; GeoGebra draws the actual curve.
+    finite = []
+    for fn in functions:
+        for i in range(361):
+            x = xmin + (xmax - xmin) * i / 360
+            try:
+                y = float(fn(x))
+            except Exception:
+                continue
+            if math.isfinite(y) and abs(y) < 1000:
+                finite.append(y)
+
+    if scene is not None:
+        raw_ymin = getattr(scene, "y_min", None)
+        raw_ymax = getattr(scene, "y_max", None)
+    else:
+        raw_ymin = raw_ymax = None
+
+    if finite:
+        lo, hi = min(finite), max(finite)
+        span = max(1.0, hi - lo)
+        pad = max(1.0, 0.12 * span)
+        calc_ymin = math.floor(lo - pad)
+        calc_ymax = math.ceil(hi + pad)
+    else:
+        calc_ymin, calc_ymax = -5.0, 5.0
+
+    ymin = float(raw_ymin) if raw_ymin is not None else float(calc_ymin)
+    ymax = float(raw_ymax) if raw_ymax is not None else float(calc_ymax)
+    if ymax <= ymin:
+        ymin, ymax = float(calc_ymin), float(calc_ymax)
+
+    commands = [f"f{i}(x)={expr}" for i, expr in enumerate(expressions, 1)]
+    signature_source = "|".join(commands) + f"|{xmin:.6g}|{xmax:.6g}|{ymin:.6g}|{ymax:.6g}"
+    signature = hashlib.sha256(signature_source.encode("utf-8")).hexdigest()[:20]
+
+    return {
+        "commands": commands,
+        "expressions": expressions,
+        "xmin": xmin,
+        "xmax": xmax,
+        "ymin": ymin,
+        "ymax": ymax,
+        "grid": True,
+        "height": 450,
+        "signature": signature,
+    }
+
+
+def _geogebra_graph_store() -> dict[str, bytes]:
+    store = st.session_state.get("setter_geogebra_graphs")
+    if not isinstance(store, dict):
+        store = {}
+        st.session_state.setter_geogebra_graphs = store
+    return store
+
+
+def render_geogebra_question_graph(question, *, figure_caption: str = "") -> bytes | None:
+    """Mount GeoGebra, capture its PNG, and cache it for Word export."""
+    spec = _question_graph_spec(question)
+    if spec is None:
+        return None
+
+    qnum = str(getattr(question, "question_number", "graph"))
+    store = _geogebra_graph_store()
+    cache_key = f"{qnum}:{spec['signature']}"
+
+    # Existing capture survives Streamlit reruns and is immediately reusable.
+    if cache_key in store:
+        png = store[cache_key]
+        if png:
+            st.image(png, caption=figure_caption or None, use_container_width=True)
+            st.caption("Graph source: GeoGebra (captured and ready for Word export).")
+            return png
+
+    if not _GEOGEBRA_COMPONENT_AVAILABLE or _GEOGEBRA_COMPONENT is None:
+        st.caption("GeoGebra component is unavailable in this Streamlit version; using the local graph renderer.")
+        return None
+
+    st.caption("Interactive graph source: GeoGebra. The exact function below is also captured for the Word paper.")
+    try:
+        result = _GEOGEBRA_COMPONENT(
+            data=spec,
+            default={"capture": None},
+            on_capture_change=lambda: None,
+            key=f"setter_geogebra_{qnum}_{spec['signature']}",
+        )
+        capture = getattr(result, "capture", None)
+        if isinstance(capture, dict) and capture.get("ok") and capture.get("png_base64"):
+            try:
+                png = base64.b64decode(capture["png_base64"])
+                if png:
+                    store[cache_key] = png
+                    st.session_state.setter_geogebra_graphs = store
+                    st.caption("GeoGebra graph captured successfully for download.")
+                    return png
+            except Exception:
+                pass
+    except Exception as exc:
+        st.caption(f"GeoGebra component unavailable for this graph; local fallback will be used. ({type(exc).__name__})")
+    return None
+
+
+def _captured_geogebra_png(question) -> bytes | None:
+    """Return the cached GeoGebra PNG for the current question/function signature."""
+    spec = _question_graph_spec(question)
+    if spec is None:
+        return None
+    qnum = str(getattr(question, "question_number", "graph"))
+    return _geogebra_graph_store().get(f"{qnum}:{spec['signature']}")
+
+
+def add_png_to_word(doc: Document, png: bytes, *, caption: str = "") -> None:
+    """Insert a captured graph image into a Word paper with exam-paper styling."""
+    if not png:
+        return
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run()
+    run.add_picture(BytesIO(png), width=Cm(13.5))
+    if caption:
+        cp = doc.add_paragraph(caption)
+        cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        rr = cp.runs[0]
+        rr.italic = True
+        rr.font.name = "Times New Roman"
+        rr.font.size = Pt(11)
+        rr._element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman")
+        rr._element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
+        rr._element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
+
+
 def ensure_question_function_curve(question):
     """Replace axes-only/incomplete graph scenes with curves from the actual question equations."""
     scene = getattr(question, "diagram_scene_2d", None)
@@ -5079,7 +5525,37 @@ def build_setter_question_paper_docx(draft: ExamPaperDraft) -> bytes:
         append_word_mixed_math(p, q.stem_text)
         for eq in q.stem_equations:
             append_word_math(doc.add_paragraph(), eq)
-        if getattr(q, "diagram_scene_3d", None) is not None:
+        graph_spec = _question_graph_spec(q)
+        if graph_spec is not None:
+            figure_number += 1
+            ggb_png = _captured_geogebra_png(q)
+            if ggb_png:
+                add_png_to_word(
+                    doc,
+                    ggb_png,
+                    caption=f"Figure {figure_number}",
+                )
+            else:
+                # Deterministic local fallback prevents blank-axes output when
+                # the external graph has not yet been captured.
+                effective_scene_2d = ensure_question_function_curve(q)
+                scene_issues = validate_question_scene_2d(q, effective_scene_2d) if effective_scene_2d is not None else []
+                if effective_scene_2d is not None and not scene_issues:
+                    add_scene2d_to_word(
+                        doc,
+                        effective_scene_2d,
+                        caption=f"Figure {figure_number}",
+                    )
+                else:
+                    note = doc.add_paragraph()
+                    rr = note.add_run(
+                        "Function graph pending GeoGebra capture. "
+                        "Return to the generated-paper preview and allow the graph to finish loading before downloading."
+                    )
+                    rr.italic = True
+                    rr.font.name = "Times New Roman"
+                    rr.font.size = Pt(11)
+        elif getattr(q, "diagram_scene_3d", None) is not None:
             figure_number += 1
             add_scene3d_to_word(
                 doc,
@@ -5231,7 +5707,31 @@ def render_setter_preview(draft: ExamPaperDraft) -> None:
                 if eq_text:
                     render_mathio(eq_text)
 
-            if getattr(q, "diagram_scene_3d", None) is not None:
+            graph_spec = _question_graph_spec(q)
+            if graph_spec is not None:
+                figure_number += 1
+                geogebra_png = render_geogebra_question_graph(
+                    q,
+                    figure_caption=f"Figure {figure_number}",
+                )
+                if geogebra_png is None:
+                    # GeoGebra unavailable/not yet captured: retain deterministic local fallback.
+                    effective_scene_2d = ensure_question_function_curve(q)
+                    if effective_scene_2d is not None:
+                        scene_issues = validate_question_scene_2d(q, effective_scene_2d)
+                        if scene_issues:
+                            st.warning(
+                                "Function graph fallback withheld because it does not yet match the question: "
+                                + "; ".join(scene_issues)
+                            )
+                        else:
+                            show_scene2d(
+                                effective_scene_2d,
+                                caption=f"Figure {figure_number} · local fallback",
+                            )
+                    else:
+                        st.info("GeoGebra is preparing this function graph. It will be used in the Word paper once captured.")
+            elif getattr(q, "diagram_scene_3d", None) is not None:
                 figure_number += 1
                 show_scene3d(
                     q.diagram_scene_3d,
@@ -5777,6 +6277,7 @@ with setter_tab:
         ):
             st.session_state.setter_error = ""
             st.session_state.setter_draft = None
+            st.session_state.setter_geogebra_graphs = {}
             try:
                 spinner_text = (
                     "Reading the optional reference format, setting questions and auditing mark totals..."
@@ -5825,6 +6326,21 @@ with setter_tab:
                 with st.expander("Paper audit notes", expanded=False):
                     for item in setter_draft.verification_notes:
                         st.markdown(f"- {item}")
+
+            graph_questions = [q for q in setter_draft.questions if _question_graph_spec(q) is not None]
+            if graph_questions:
+                captured_count = sum(1 for q in graph_questions if _captured_geogebra_png(q))
+                if captured_count == len(graph_questions):
+                    st.success(
+                        f"GeoGebra graph capture ready: {captured_count}/{len(graph_questions)} function graph(s) "
+                        "will be inserted into the Word paper."
+                    )
+                else:
+                    st.info(
+                        f"GeoGebra graph capture: {captured_count}/{len(graph_questions)} ready. "
+                        "Allow the graph preview(s) above to finish loading before downloading for the best result. "
+                        "The local deterministic graph renderer remains the fallback."
+                    )
 
             question_docx = build_setter_question_paper_docx(setter_draft)
             downloads = st.columns(2 if include_scheme else 1)
@@ -6649,9 +7165,220 @@ with ai_tab:
 # ---------- Offline generated practice ----------
 
 # ---------- Batch / class trend analysis ----------
+_QUESTION_COMMAND_RE = re.compile(
+    r"(?i)^(Simplify|Evaluate|Calculate|Find|Solve|Expand|Factorise|Factorize|Divide|"
+    r"Express|Write|State|Determine|Show that|Prove that|Given that|Hence|Complete|"
+    r"Sketch|Draw|Plot|Construct|Estimate|Arrange|Compare|Convert|Factor|Substitute)\b"
+)
+
+# Mathematical fragments that should be rendered with MathIO rather than as prose.
+_GENERIC_MATH_TOKEN_RE = re.compile(
+    r"""
+    (?:
+        # LaTeX/MathIO commands and symbols
+        \\(?:frac|sqrt|angle|theta|alpha|beta|gamma|delta|pi|sin|cos|tan|arcsin|arccos|arctan|log|ln|times|div|leq|geq|neq|pm|parallel|perp)\b[^\s,.;:!?]*
+        |
+        # Explicit equations / inequalities
+        [A-Za-z][A-Za-z0-9_]*\s*(?:=|≤|≥|<|>)\s*[^,.;:!?]+
+        |
+        # Ratios / proportions
+        \d+(?:\.\d+)?\s*:\s*\d+(?:\.\d+)?(?:\s*:\s*\d+(?:\.\d+)?)*
+        |
+        # Coordinates
+        \(\s*[-+]?\d+(?:\.\d+)?\s*,\s*[-+]?\d+(?:\.\d+)?\s*\)
+        |
+        # Algebraic expressions with powers/brackets/operators
+        (?:[-+]?\d*(?:\.\d+)?[A-Za-z](?:\^\{?[-+]?\d+\}?|\^\(?[-+]?\d+\)?)?)
+        (?:\s*[+\-×÷*/]\s*(?:[-+]?\d*(?:\.\d+)?[A-Za-z0-9](?:\^\{?[-+]?\d+\}?)?|\([^)]*\)))+
+        |
+        # Standalone powers / standard form
+        \d+(?:\.\d+)?\s*(?:×|\\times|x)\s*10\s*\^\s*[-+]?\d+
+        |
+        [A-Za-z0-9]+\s*\^\s*\{?[-+]?\d+\}?
+        |
+        # Fractions written linearly
+        \d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?
+        |
+        # Percentages and measured values
+        [-+]?\d+(?:\.\d+)?\s*(?:%|°|cm|mm|m|km|g|kg|s|h)(?:\^2|\^3)?
+        |
+        # Number sequences / comma-separated numeric data
+        [-+]?\d+(?:\.\d+)?(?:\s*,\s*[-+]?\d+(?:\.\d+)?){2,}(?:\s*,?\s*(?:\.\.\.|…))?
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+def _normalise_question_source(text: str) -> str:
+    """Convert common verbal maths into symbolic forms without changing ordinary prose."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    value = re.sub(r"(?<!\\)\btheta\b", r"\\theta", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(\d+(?:\.\d+)?)\s+degrees?\b", r"\1^{\\circ}", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b([A-Za-z])\s+squared\b", lambda m: f"{m.group(1)}^2", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b([A-Za-z])\s+cubed\b", lambda m: f"{m.group(1)}^3", value, flags=re.IGNORECASE)
+
+    # e.g. y = x squared divided by (2x+1)
+    value = re.sub(
+        r"\b([A-Za-z])\s*=\s*([A-Za-z])\^2\s+divided\s+by\s+\(([^)]+)\)",
+        lambda m: rf"{m.group(1)} = \frac{{{m.group(2)}^2}}{{{m.group(3)}}}",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = value.replace("...", r"\ldots")
+    return value
+
+
+def _split_question_text_math(text: str) -> list[tuple[str, str]]:
+    """Return ordered ('text'|'math', content) chunks for any question type."""
+    source = _normalise_question_source(text)
+    if not source:
+        return []
+
+    chunks: list[tuple[str, str]] = []
+    cursor = 0
+
+    for match in _GENERIC_MATH_TOKEN_RE.finditer(source):
+        # Avoid treating a bare single variable inside normal prose as a display equation.
+        frag = match.group(0).strip()
+        if not frag:
+            continue
+
+        if match.start() > cursor:
+            prose = source[cursor:match.start()].strip()
+            if prose:
+                chunks.append(("text", prose))
+
+        chunks.append(("math", frag))
+        cursor = match.end()
+
+    if cursor < len(source):
+        prose = source[cursor:].strip()
+        if prose:
+            chunks.append(("text", prose))
+
+    if not chunks:
+        return [("text", source)]
+
+    # Merge adjacent chunks of the same type.
+    merged: list[tuple[str, str]] = []
+    for kind, content in chunks:
+        if merged and merged[-1][0] == kind:
+            sep = " " if kind == "text" else r"\quad "
+            merged[-1] = (kind, merged[-1][1] + sep + content)
+        else:
+            merged.append((kind, content))
+    return merged
+
+
+def _offline_prompt_parts(prompt: str) -> tuple[str, str, str]:
+    """Compatibility wrapper retained for existing callers."""
+    chunks = _split_question_text_math(prompt)
+    prose_before = []
+    maths = []
+    prose_after = []
+    seen_math = False
+
+    for kind, content in chunks:
+        if kind == "math":
+            seen_math = True
+            maths.append(content)
+        elif not seen_math:
+            prose_before.append(content)
+        else:
+            prose_after.append(content)
+
+    return (
+        " ".join(prose_before).strip(),
+        r"\quad ".join(maths).strip(),
+        " ".join(prose_after).strip(),
+    )
+
+
+
+def _question_chunk_to_inline_text(kind: str, content: str) -> str:
+    """Convert short maths chunks to readable inline Unicode/Markdown-safe text."""
+    if kind == "text":
+        return str(content or "").strip()
+
+    value = str(content or "").strip()
+    if not value:
+        return ""
+
+    # For short question fragments, preserve horizontal sentence flow instead of
+    # mounting a separate MathIO component for every number/unit.
+    value = value.replace(r"\theta", "θ")
+    value = value.replace(r"\pi", "π")
+    value = value.replace(r"\times", "×")
+    value = value.replace(r"\div", "÷")
+    value = value.replace(r"\leq", "≤")
+    value = value.replace(r"\geq", "≥")
+    value = value.replace(r"\neq", "≠")
+    value = value.replace(r"\pm", "±")
+    value = value.replace(r"\ldots", "…")
+    value = re.sub(r"\^\{([^{}]+)\}", r"^\1", value)
+    value = re.sub(r"\^\{?\\circ\}?", "°", value)
+    value = re.sub(r"(?<=\d)\s*(km|cm|mm|kg|g|m|s|h)\b", r" \1", value)
+    return value
+
+
+def _is_large_standalone_math(content: str) -> bool:
+    """Decide when a maths fragment deserves its own MathIO display line."""
+    value = str(content or "").strip()
+    if not value:
+        return False
+
+    # Display genuinely structural maths separately.
+    if any(token in value for token in (r"\frac", r"\sqrt", r"\int", r"\sum", r"\begin{", r"\matrix")):
+        return True
+    if len(value) > 42 and re.search(r"[=+\-*/^]", value):
+        return True
+    if value.count("=") >= 2:
+        return True
+    return False
+
+
+def render_question_text_mathio(prompt: str) -> None:
+    """Render a question compactly, keeping prose and short maths on the same line."""
+    chunks = _split_question_text_math(prompt)
+    if not chunks:
+        return
+
+    inline_parts: list[str] = []
+
+    def flush_inline() -> None:
+        if not inline_parts:
+            return
+        text = " ".join(part for part in inline_parts if part).strip()
+        text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+        text = re.sub(r"\(\s+", "(", text)
+        text = re.sub(r"\s+\)", ")", text)
+        if text:
+            st.markdown(text)
+        inline_parts.clear()
+
+    for kind, content in chunks:
+        if kind == "math" and _is_large_standalone_math(content):
+            flush_inline()
+            render_mathio(content)
+        else:
+            piece = _question_chunk_to_inline_text(kind, content)
+            if piece:
+                inline_parts.append(piece)
+
+    flush_inline()
+
+
+
+def render_offline_practice_prompt(prompt: str) -> None:
+    """Offline practice uses compact horizontal mixed text/math rendering."""
+    render_question_text_mathio(prompt)
+
+
 with practice_tab:
     st.subheader("No-credit syllabus-generated practice")
     st.caption("This tab never calls Gemini. It keeps working even if the API key is missing or a free-tier quota is reached.")
+    st.caption("Questions are varied by level, topic, learning outcome and cognitive demand using the compiled G1/G2/G3 learning outcomes.")
     if is_additional_math_track(track_label):
         st.info(
             "The deterministic offline generator is currently available for G1/G2/G3 Mathematics. "
@@ -6665,7 +7392,15 @@ with practice_tab:
     with c1:
         topic_label = st.selectbox("Topic", list(topic_labels.keys()), key="topic_choice")
     with c2:
-        difficulty = st.selectbox("Difficulty", ["Foundation", "Similar", "Stretch"], index=1)
+        difficulty = st.selectbox(
+            "Difficulty",
+            ["Foundation", "Similar", "Stretch"],
+            index=1,
+            help=(
+                "Foundation: direct concept/fluency. Similar: standard syllabus application. "
+                "Stretch: reverse, multi-step, reasoning or less-familiar application."
+            ),
+        )
     with c3:
         st.write("")
         st.write("")
@@ -6680,13 +7415,12 @@ with practice_tab:
         st.markdown(f"### {official_topic_code(question.track, question.topic_code)} · {question.topic_name}")
         st.caption(f"{question.strand} · {question.difficulty}")
 
-        # Offline practice uses the same MathIO rendering policy as the online tutor:
-        # prose remains readable text while every mathematical fragment is rendered
-        # through MathIO. Do not place raw expressions directly in Markdown/HTML.
+        # Keep the complete expression in one MathIO block so operators and powers
+        # appear horizontally instead of as separate rows with large blank spaces.
         with st.container(border=True):
-            render_guidance_mixed_mathio(question.prompt)
+            render_offline_practice_prompt(question.prompt)
 
-        st.markdown("**Target skill:**")
+        st.markdown("**Learning outcome focus:**")
         render_guidance_mixed_mathio(question.target_skill)
 
         if st.button("Show next hint", key="show_hint"):
@@ -6773,6 +7507,34 @@ with own_tab:
             except ValueError as exc:
                 st.warning(str(exc))
 
+def _topic_offline_support(topic) -> str:
+    """Support both legacy syllabus Topic objects and the new learning-outcome model."""
+    legacy = getattr(topic, "offline_support", None)
+    if legacy:
+        return str(legacy)
+
+    # Topics in the new engine are backed by compiled learning outcomes.
+    if getattr(topic, "code", None) and getattr(topic, "name", None):
+        return "Strong"
+    return "Unknown"
+
+
+def _topic_coverage_note(topic) -> str:
+    """Return legacy notes when available, otherwise describe the outcome-backed practice."""
+    note = getattr(topic, "notes", None)
+    if note:
+        return str(note)
+
+    keywords = tuple(getattr(topic, "keywords", ()) or ())
+    if keywords:
+        return (
+            "Offline practice is generated from compiled learning outcomes for this topic. "
+            "Question families include: " + ", ".join(keywords[:6]) + "."
+        )
+
+    return "Offline practice is generated from the compiled learning outcomes for this topic."
+
+
 # ---------- Coverage ----------
 with syllabus_tab:
     info = selected_track_info(track_label)
@@ -6798,18 +7560,18 @@ with syllabus_tab:
             )
         else:
             selected = topics_for_track(tcode)
-            strong = sum(1 for t in selected if t.offline_support == "Strong")
-            partial = sum(1 for t in selected if t.offline_support == "Partial")
+            strong = sum(1 for t in selected if _topic_offline_support(t) == "Strong")
+            partial = sum(1 for t in selected if _topic_offline_support(t) == "Partial")
             c1, c2, c3 = st.columns(3)
             c1.metric("Topics mapped", len(selected))
-            c2.metric("Strong offline generated support", strong)
-            c3.metric("Partial offline generated support", partial)
+            c2.metric("Outcome-mapped offline topics", strong)
+            c3.metric("Legacy/partial topics", partial)
             for strand in ("Number and Algebra", "Geometry and Measurement", "Statistics and Probability"):
                 st.markdown(f"### {strand}")
                 for t in [x for x in selected if x.strand == strand]:
-                    badge = "✅ Strong" if t.offline_support == "Strong" else "🟡 Partial"
+                    badge = "✅ Strong" if _topic_offline_support(t) == "Strong" else "🟡 Partial"
                     with st.expander(f"{official_topic_code(tcode, t.code)} · {t.name} — {badge}"):
-                        st.write(t.notes)
+                        st.write(_topic_coverage_note(t))
     else:
         st.subheader("2026 Singapore Mathematics syllabus coverage")
         st.write(
@@ -6817,18 +7579,18 @@ with syllabus_tab:
             "Gemini online mode broadens interpretation to uploaded handwriting, diagrams, PDFs, word problems and alternative methods."
         )
         selected = topics_for_track(tcode)
-        strong = sum(1 for t in selected if t.offline_support == "Strong")
-        partial = sum(1 for t in selected if t.offline_support == "Partial")
+        strong = sum(1 for t in selected if _topic_offline_support(t) == "Strong")
+        partial = sum(1 for t in selected if _topic_offline_support(t) == "Partial")
         c1, c2, c3 = st.columns(3)
         c1.metric("Topics mapped", len(selected))
-        c2.metric("Strong offline generated support", strong)
-        c3.metric("Partial offline generated support", partial)
+        c2.metric("Outcome-mapped offline topics", strong)
+        c3.metric("Legacy/partial topics", partial)
         for strand in ("Number and Algebra", "Geometry and Measurement", "Statistics and Probability"):
             st.markdown(f"### {strand}")
             for t in [x for x in selected if x.strand == strand]:
-                badge = "✅ Strong" if t.offline_support == "Strong" else "🟡 Partial"
+                badge = "✅ Strong" if _topic_offline_support(t) == "Strong" else "🟡 Partial"
                 with st.expander(f"{official_topic_code(tcode, t.code)} · {t.name} — {badge}"):
-                    st.write(t.notes)
+                    st.write(_topic_coverage_note(t))
 
     st.warning(
         "Coverage means the tutor has support for these areas; it does not guarantee perfect interpretation of every examination question. "
